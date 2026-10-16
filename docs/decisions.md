@@ -48,3 +48,16 @@ A revisão inicial do Alembic é deliberadamente vazia: ela estabelece o baselin
   criação dessa versão usa a constraint de identidade como proteção contra workers concorrentes.
 - Resultado da classificação e conclusão do job pertencem à mesma transação, evitando resultado
   sem conclusão ou conclusão sem histórico.
+
+## Fronteira com o provedor de IA
+
+- A integração com `llm-sim` foi criada em módulos independentes de cliente, prompt, parser e
+  schemas. Ela permanece desconectada do `ClassificationWorker` até a fase de integração.
+- `classifier-v1` envia somente assunto e mensagem no campo `input`. Instruções ficam em
+  `system`, que declara explicitamente que o ticket é dado não confiável.
+- O parser só extrai um único objeto JSON completo. Texto externo é aceito apenas quando curto e
+  sem estruturas JSON concorrentes; depois disso, Pydantic valida campos obrigatórios e enums sem
+  normalização semântica.
+- Erros de autenticação, requisição inválida, rate limit, falha transitória, timeout, transporte e
+  resposta inválida possuem exceções de domínio distintas. A chave de API não integra mensagens
+  de erro nem logs.

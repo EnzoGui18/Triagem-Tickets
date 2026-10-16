@@ -40,6 +40,9 @@ async def _enqueue_job(
     external_id: str,
 ) -> tuple[UUID, UUID]:
     async with session_factory() as session, session.begin():
+        database_now = await session.scalar(select(func.clock_timestamp()))
+        if database_now is None:  # pragma: no cover - PostgreSQL always returns a value
+            raise RuntimeError("database clock is unavailable")
         ticket = Ticket(
             external_id=external_id,
             customer_external_id=f"customer-{external_id}",
@@ -57,6 +60,7 @@ async def _enqueue_job(
             ticket_id=ticket.id,
             job_type=JobType.CLASSIFICATION,
             queue_priority=10,
+            available_at=database_now - timedelta(minutes=1),
         )
         session.add(job)
         await session.flush()
@@ -101,9 +105,7 @@ async def test_concurrent_workers_complete_each_job_once(
     async with worker_session_factory() as session:
         jobs = list(
             (
-                await session.scalars(
-                    select(ProcessingJob).where(ProcessingJob.id.in_(job_ids))
-                )
+                await session.scalars(select(ProcessingJob).where(ProcessingJob.id.in_(job_ids)))
             ).all()
         )
         classification_counts = dict(

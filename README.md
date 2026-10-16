@@ -36,6 +36,11 @@ executa o `FakeClassifier` determinístico e persiste o histórico de classifica
 expirados voltam para retry, permitindo retomada após interrupção do worker. Nesta fase não
 há chamada ao provedor de IA.
 
+Os componentes isolados da integração com `llm-sim` ficam em `triagem.llm`: cliente HTTPX,
+prompt `classifier-v1`, parser de resposta e schemas Pydantic. Eles ainda não estão conectados
+ao `ClassificationWorker`; o processamento em execução continua usando somente o
+`FakeClassifier`.
+
 ## Desenvolvimento local
 
 ```bash

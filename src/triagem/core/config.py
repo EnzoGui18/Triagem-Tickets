@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,6 +15,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     database_url: str = "postgresql+asyncpg://triagem:triagem@localhost:5432/triagem"
     redis_url: str = "redis://localhost:6379/0"
+    llm_base_url: str = "http://llm-sim:8080"
+    llm_api_key: SecretStr = SecretStr("")
+    llm_model: str = "triagem-sim-1"
+    llm_timeout_seconds: float = 10.0
     classification_worker_lease_seconds: float = 30.0
     classification_worker_retry_delay_seconds: float = 5.0
     classification_worker_poll_interval_seconds: float = 1.0

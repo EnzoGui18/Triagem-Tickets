@@ -6,7 +6,25 @@ O processo da API não exige disponibilidade de serviços externos para iniciar.
 
 Os containers compartilham a rede Docker externa `desafio-kit`. Uma execução isolada de migração termina antes do início da API.
 
-Chamadas ao LLM, entrega de alertas e rate limiting ainda não fazem parte da aplicação.
+O cliente do LLM, o prompt e o parser existem como componentes isolados e ainda não são
+invocados pela API nem pelo worker. Entrega de alertas e rate limiting ainda não fazem parte da
+aplicação.
+
+## Integração isolada com o LLM
+
+O pacote `triagem.llm` separa quatro responsabilidades: contrato HTTP, prompt, extração do JSON
+e validação semântica. O cliente usa o contrato oficial `model/system/input`, envia a chave
+somente no header `Authorization` e preserva status HTTP, id da geração, modelo e usage na
+resposta de domínio.
+
+O prompt `classifier-v1` mantém instruções exclusivamente em `system`. O campo `input` contém
+um JSON apenas com assunto e mensagem; identificadores e dados pessoais do cliente não são
+enviados. O parser aceita JSON puro, uma cerca markdown ou um único objeto com pequeno texto ao
+redor. Em todos os casos, o objeto passa pelo mesmo schema Pydantic e valores fora dos enums não
+são convertidos.
+
+Nenhum desses componentes participa do readiness. A indisponibilidade do `llm-sim` continua sem
+impedir a API de receber tickets.
 
 ## Job engine de classificação
 
