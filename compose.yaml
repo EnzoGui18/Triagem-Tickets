@@ -1,0 +1,104 @@
+name: triagem-tickets
+
+x-app-environment: &app-environment
+  APP_ENV: ${APP_ENV:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-triagem}:${POSTGRES_PASSWORD:-triagem}@postgres:5432/${POSTGRES_DB:-triagem}
+  REDIS_URL: redis://redis:6379/0
+  CLASSIFICATION_WORKER_LEASE_SECONDS: ${CLASSIFICATION_WORKER_LEASE_SECONDS:-30}
+  CLASSIFICATION_WORKER_RETRY_DELAY_SECONDS: ${CLASSIFICATION_WORKER_RETRY_DELAY_SECONDS:-5}
+  CLASSIFICATION_WORKER_POLL_INTERVAL_SECONDS: ${CLASSIFICATION_WORKER_POLL_INTERVAL_SECONDS:-1}
+
+services:
+  api:
+    build:
+      context: .
+      target: runtime
+    environment: *app-environment
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - desafio-kit
+
+  classification-worker:
+    build:
+      context: .
+      target: runtime
+    command: ["python", "-m", "triagem.workers.classification"]
+    environment: *app-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks:
+      - desafio-kit
+
+  migrate:
+    build:
+      context: .
+      target: runtime
+    command: ["alembic", "upgrade", "head"]
+    environment: *app-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - desafio-kit
+
+  test:
+    profiles: ["test"]
+    build:
+      context: .
+      target: test
+    environment:
+      <<: *app-environment
+      TEST_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-triagem}:${POSTGRES_PASSWORD:-triagem}@postgres:5432/${POSTGRES_DB:-triagem}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - desafio-kit
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-triagem}
+      POSTGRES_USER: ${POSTGRES_USER:-triagem}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-triagem}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - desafio-kit
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - redis_data:/data
+    networks:
+      - desafio-kit
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  desafio-kit:
+    name: desafio-kit
+    external: true
