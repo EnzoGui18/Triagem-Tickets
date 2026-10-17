@@ -3,6 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from triagem.llm.client import LLMClient
+from triagem.llm.parser import parse_classification_output
+from triagem.llm.prompt import (
+    CLASSIFIER_OUTPUT_SCHEMA_VERSION,
+    CLASSIFIER_PROMPT_VERSION,
+    CLASSIFIER_V1_SYSTEM_PROMPT,
+    build_classifier_input,
+)
 from triagem.models import (
     ClassificationCategory,
     Sentiment,
@@ -27,6 +35,8 @@ class ClassificationResult:
     sentiment: Sentiment
     suggested_response: str
     provider_request_id: str | None = None
+    provider_model: str | None = None
+    raw_output: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
     provider_latency_ms: int | None = None
@@ -36,6 +46,37 @@ class Classifier(Protocol):
     identity: ClassifierIdentity
 
     async def classify(self, ticket: Ticket) -> ClassificationResult: ...
+
+
+class LLMClassifier:
+    def __init__(self, client: LLMClient) -> None:
+        self._client = client
+        self.identity = ClassifierIdentity(
+            provider="llm-sim",
+            model_name=client.model,
+            version=CLASSIFIER_PROMPT_VERSION,
+            system_prompt=CLASSIFIER_V1_SYSTEM_PROMPT,
+            output_schema_version=CLASSIFIER_OUTPUT_SCHEMA_VERSION,
+        )
+
+    async def classify(self, ticket: Ticket) -> ClassificationResult:
+        generation = await self._client.generate(
+            system=CLASSIFIER_V1_SYSTEM_PROMPT,
+            input_text=build_classifier_input(subject=ticket.subject, message=ticket.message),
+        )
+        parsed = parse_classification_output(generation.output_text)
+        return ClassificationResult(
+            category=parsed.categoria,
+            priority=parsed.prioridade,
+            sentiment=parsed.sentimento,
+            suggested_response=parsed.sugestao_resposta,
+            provider_request_id=generation.id,
+            provider_model=generation.model,
+            raw_output=generation.output_text,
+            input_tokens=generation.usage.input_tokens,
+            output_tokens=generation.usage.output_tokens,
+            provider_latency_ms=generation.latency_ms,
+        )
 
 
 class FakeClassifier:

@@ -31,6 +31,7 @@ class ProviderGenerationResponse(BaseModel):
 
 class GenerationResult(ProviderGenerationResponse):
     status_code: int = Field(ge=100, le=599)
+    latency_ms: int = Field(ge=0)
 
 
 class ClassificationOutput(BaseModel):

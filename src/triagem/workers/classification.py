@@ -2,19 +2,38 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
+import random
 import socket
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from uuid import UUID, uuid4
 
+import httpx
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from triagem.classifiers import ClassificationResult, Classifier, FakeClassifier
+from triagem.classifiers import ClassificationResult, Classifier, LLMClassifier
 from triagem.core.config import get_settings
 from triagem.core.database import async_session_factory, engine
+from triagem.core.redis import redis_client
+from triagem.llm.client import (
+    LLMAuthenticationError,
+    LLMClient,
+    LLMHTTPError,
+    LLMInvalidRequestError,
+    LLMInvalidResponseError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+    LLMTransientProviderError,
+    LLMTransportError,
+)
+from triagem.llm.parser import LLMOutputError
+from triagem.llm.rate_limiter import RateLimiterError, RedisSlidingWindowRateLimiter
 from triagem.models import (
     Classification,
     ClassifierVersion,
@@ -36,6 +55,62 @@ class ReservedJob:
     attempt_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class FailurePolicy:
+    retryable: bool
+    error_code: str
+    retry_after_seconds: float | None = None
+
+
+def _retry_after_seconds(value: str | None, now: datetime) -> float | None:
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        seconds = (retry_at - now).total_seconds()
+    if not math.isfinite(seconds):
+        return None
+    return max(0.0, seconds)
+
+
+def _failure_policy(error: Exception, now: datetime) -> FailurePolicy:
+    if isinstance(error, LLMRateLimitError):
+        return FailurePolicy(
+            retryable=True,
+            error_code="llm_rate_limited",
+            retry_after_seconds=_retry_after_seconds(error.retry_after, now),
+        )
+    if isinstance(error, LLMAuthenticationError):
+        return FailurePolicy(retryable=False, error_code="llm_authentication_failed")
+    if isinstance(error, LLMInvalidRequestError):
+        error_code = (
+            "llm_context_length_exceeded"
+            if error.error_type == "context_length_exceeded"
+            else "llm_invalid_request"
+        )
+        return FailurePolicy(retryable=False, error_code=error_code)
+    if isinstance(error, LLMTransientProviderError):
+        return FailurePolicy(retryable=True, error_code=f"llm_http_{error.status_code}")
+    if isinstance(error, LLMTimeoutError):
+        return FailurePolicy(retryable=True, error_code="llm_timeout")
+    if isinstance(error, LLMTransportError):
+        return FailurePolicy(retryable=True, error_code="llm_network_failure")
+    if isinstance(error, (LLMInvalidResponseError, LLMOutputError)):
+        return FailurePolicy(retryable=True, error_code="llm_invalid_output")
+    if isinstance(error, LLMHTTPError):
+        return FailurePolicy(retryable=False, error_code=f"llm_http_{error.status_code}")
+    if isinstance(error, RateLimiterError):
+        return FailurePolicy(retryable=True, error_code="rate_limiter_unavailable")
+    return FailurePolicy(retryable=True, error_code="classification_unexpected_error")
+
+
 class ClassificationWorker:
     def __init__(
         self,
@@ -45,6 +120,8 @@ class ClassificationWorker:
         worker_id: str,
         lease_duration: timedelta,
         retry_delay: timedelta,
+        max_retry_delay: timedelta = timedelta(minutes=5),
+        jitter_source: Callable[[float, float], float] = random.uniform,
         poll_interval_seconds: float = 1.0,
     ) -> None:
         if not worker_id or len(worker_id) > 255:
@@ -53,6 +130,8 @@ class ClassificationWorker:
             raise ValueError("lease_duration must be positive")
         if retry_delay < timedelta(0):
             raise ValueError("retry_delay cannot be negative")
+        if max_retry_delay < retry_delay:
+            raise ValueError("max_retry_delay cannot be shorter than retry_delay")
         if poll_interval_seconds <= 0:
             raise ValueError("poll_interval_seconds must be positive")
 
@@ -61,6 +140,8 @@ class ClassificationWorker:
         self.worker_id = worker_id
         self.lease_duration = lease_duration
         self.retry_delay = retry_delay
+        self.max_retry_delay = max_retry_delay
+        self._jitter_source = jitter_source
         self.poll_interval_seconds = poll_interval_seconds
 
     async def reserve_next_job(self) -> ReservedJob | None:
@@ -232,6 +313,8 @@ class ClassificationWorker:
                 sentiment=result.sentiment,
                 suggested_response=result.suggested_response,
                 provider_request_id=result.provider_request_id,
+                provider_model=result.provider_model,
+                raw_output=result.raw_output,
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,
                 provider_latency_ms=result.provider_latency_ms,
@@ -261,15 +344,23 @@ class ClassificationWorker:
             now = await session.scalar(select(func.clock_timestamp()))
             if now is None:  # pragma: no cover - PostgreSQL always returns a value
                 raise RuntimeError("database clock is unavailable")
+            policy = _failure_policy(error, now)
             job.locked_at = None
             job.locked_by = None
-            job.last_error_code = type(error).__name__[:100]
-            job.last_error_message = "classification attempt failed"
+            job.last_error_code = policy.error_code
+            job.last_error_message = (
+                "retryable classification failure"
+                if policy.retryable
+                else "permanent classification failure"
+            )
             job.updated_at = now
 
-            if job.attempt_count < job.max_attempts:
+            if policy.retryable and job.attempt_count < job.max_attempts:
                 job.status = JobStatus.RETRY_SCHEDULED
-                job.available_at = now + self.retry_delay
+                job.available_at = now + self._retry_delay_for(
+                    attempt_count=job.attempt_count,
+                    retry_after_seconds=policy.retry_after_seconds,
+                )
             else:
                 job.status = JobStatus.FAILED
                 job.completed_at = now
@@ -279,6 +370,28 @@ class ClassificationWorker:
                     .values(status=TicketStatus.FAILED, updated_at=now)
                 )
             return True
+
+    def _retry_delay_for(
+        self,
+        *,
+        attempt_count: int,
+        retry_after_seconds: float | None,
+    ) -> timedelta:
+        exponent = min(max(0, attempt_count - 1), 30)
+        maximum_seconds = self.max_retry_delay.total_seconds()
+        exponential_seconds = min(
+            self.retry_delay.total_seconds() * (2**exponent),
+            maximum_seconds,
+        )
+        jitter_ceiling = min(
+            exponential_seconds * 0.25,
+            maximum_seconds - exponential_seconds,
+        )
+        jitter_seconds = self._jitter_source(0.0, jitter_ceiling)
+        scheduled_seconds = exponential_seconds + min(max(0.0, jitter_seconds), jitter_ceiling)
+        if retry_after_seconds is not None:
+            scheduled_seconds = max(scheduled_seconds, retry_after_seconds)
+        return timedelta(seconds=scheduled_seconds)
 
     async def _owned_job(
         self,
@@ -331,17 +444,35 @@ def _worker_id() -> str:
 
 async def _run_worker() -> None:
     settings = get_settings()
-    worker = ClassificationWorker(
-        async_session_factory,
-        FakeClassifier(),
-        worker_id=_worker_id(),
-        lease_duration=timedelta(seconds=settings.classification_worker_lease_seconds),
-        retry_delay=timedelta(seconds=settings.classification_worker_retry_delay_seconds),
-        poll_interval_seconds=settings.classification_worker_poll_interval_seconds,
-    )
     try:
-        await worker.run_forever()
+        async with httpx.AsyncClient() as http_client:
+            rate_limiter = RedisSlidingWindowRateLimiter(
+                redis_client,
+                rate_per_second=settings.llm_rate_limit_rps,
+            )
+            llm_client = LLMClient(
+                base_url=settings.llm_base_url,
+                api_key=settings.llm_api_key.get_secret_value(),
+                model=settings.llm_model,
+                timeout_seconds=settings.llm_timeout_seconds,
+                rate_limiter=rate_limiter,
+                max_concurrency=settings.llm_max_concurrency,
+                http_client=http_client,
+            )
+            worker = ClassificationWorker(
+                async_session_factory,
+                LLMClassifier(llm_client),
+                worker_id=_worker_id(),
+                lease_duration=timedelta(seconds=settings.classification_worker_lease_seconds),
+                retry_delay=timedelta(seconds=settings.classification_worker_retry_delay_seconds),
+                max_retry_delay=timedelta(
+                    seconds=settings.classification_worker_max_retry_delay_seconds
+                ),
+                poll_interval_seconds=settings.classification_worker_poll_interval_seconds,
+            )
+            await worker.run_forever()
     finally:
+        await redis_client.aclose()
         await engine.dispose()
 
 

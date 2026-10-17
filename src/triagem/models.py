@@ -210,13 +210,13 @@ class Classification(Base):
         nullable=False,
     )
     sentiment: Mapped[Sentiment] = mapped_column(
-        SqlEnum(
-            Sentiment, name="sentiment", values_callable=_enum_values, validate_strings=True
-        ),
+        SqlEnum(Sentiment, name="sentiment", values_callable=_enum_values, validate_strings=True),
         nullable=False,
     )
     suggested_response: Mapped[str] = mapped_column(Text, nullable=False)
     provider_request_id: Mapped[str | None] = mapped_column(String(255))
+    provider_model: Mapped[str | None] = mapped_column(String(255))
+    raw_output: Mapped[str | None] = mapped_column(Text)
     input_tokens: Mapped[int | None] = mapped_column(Integer)
     output_tokens: Mapped[int | None] = mapped_column(Integer)
     provider_latency_ms: Mapped[int | None] = mapped_column(Integer)
@@ -225,9 +225,7 @@ class Classification(Base):
     )
 
     ticket: Mapped[Ticket] = relationship(back_populates="classifications")
-    classifier_version: Mapped[ClassifierVersion] = relationship(
-        back_populates="classifications"
-    )
+    classifier_version: Mapped[ClassifierVersion] = relationship(back_populates="classifications")
     processing_jobs: Mapped[list[ProcessingJob]] = relationship(
         back_populates="classification", passive_deletes=True
     )
@@ -302,9 +300,7 @@ class ProcessingJob(TimestampMixin, Base):
 class AlertDelivery(TimestampMixin, Base):
     __tablename__ = "alert_deliveries"
     __table_args__ = (
-        UniqueConstraint(
-            "classification_id", "attempt_number", name="uq_alert_delivery_attempt"
-        ),
+        UniqueConstraint("classification_id", "attempt_number", name="uq_alert_delivery_attempt"),
         CheckConstraint("attempt_number > 0", name="ck_alert_attempt_number"),
         CheckConstraint(
             "http_status_code IS NULL OR http_status_code BETWEEN 100 AND 599",

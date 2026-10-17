@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -14,6 +15,11 @@ from triagem.llm.client import (
     LLMTransientProviderError,
     LLMTransportError,
 )
+
+
+class ImmediateRateLimiter:
+    async def acquire(self) -> None:
+        return None
 
 
 def _success_payload() -> dict[str, object]:
@@ -41,6 +47,8 @@ async def test_client_sends_official_contract_and_captures_metadata() -> None:
             base_url="http://llm-sim:8080/",
             api_key="test-key",
             timeout_seconds=9,
+            rate_limiter=ImmediateRateLimiter(),
+            max_concurrency=3,
             http_client=http_client,
         )
         result = await client.generate(
@@ -53,6 +61,7 @@ async def test_client_sends_official_contract_and_captures_metadata() -> None:
     assert result.model == "triagem-sim-1"
     assert result.usage.input_tokens == 42
     assert result.usage.output_tokens == 9
+    assert result.latency_ms >= 0
 
 
 @pytest.mark.parametrize(
@@ -81,6 +90,8 @@ async def test_client_maps_http_failures_to_domain_errors(
         client = LLMClient(
             base_url="http://llm-sim:8080",
             api_key="test-key",
+            rate_limiter=ImmediateRateLimiter(),
+            max_concurrency=3,
             http_client=http_client,
         )
         with pytest.raises(expected_error) as captured:
@@ -101,6 +112,8 @@ async def test_client_maps_httpx_timeout() -> None:
             base_url="http://llm-sim:8080",
             api_key="test-key",
             timeout_seconds=0.1,
+            rate_limiter=ImmediateRateLimiter(),
+            max_concurrency=3,
             http_client=http_client,
         )
         with pytest.raises(LLMTimeoutError):
@@ -115,6 +128,8 @@ async def test_client_maps_httpx_connection_failure() -> None:
         client = LLMClient(
             base_url="http://llm-sim:8080",
             api_key="test-key",
+            rate_limiter=ImmediateRateLimiter(),
+            max_concurrency=3,
             http_client=http_client,
         )
         with pytest.raises(LLMTransportError):
@@ -129,7 +144,46 @@ async def test_client_rejects_invalid_success_response() -> None:
         client = LLMClient(
             base_url="http://llm-sim:8080",
             api_key="test-key",
+            rate_limiter=ImmediateRateLimiter(),
+            max_concurrency=3,
             http_client=http_client,
         )
         with pytest.raises(LLMInvalidResponseError):
             await client.generate(system="system", input_text="input")
+
+
+async def test_client_limits_concurrent_requests_separately_from_rate() -> None:
+    current_requests = 0
+    peak_requests = 0
+    two_requests_started = asyncio.Event()
+    release_requests = asyncio.Event()
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal current_requests, peak_requests
+        current_requests += 1
+        peak_requests = max(peak_requests, current_requests)
+        if current_requests == 2:
+            two_requests_started.set()
+        await release_requests.wait()
+        current_requests -= 1
+        return httpx.Response(200, json=_success_payload())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = LLMClient(
+            base_url="http://llm-sim:8080",
+            api_key="test-key",
+            rate_limiter=ImmediateRateLimiter(),
+            max_concurrency=2,
+            http_client=http_client,
+        )
+        requests = [
+            asyncio.create_task(client.generate(system="system", input_text=f"input-{index}"))
+            for index in range(4)
+        ]
+        await asyncio.wait_for(two_requests_started.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert peak_requests == 2
+        release_requests.set()
+        await asyncio.gather(*requests)
+
+    assert peak_requests == 2

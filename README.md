@@ -31,15 +31,21 @@ jobs duráveis e tentativas de entrega de alertas. O schema é aplicado pelo ser
 transação. A resposta é HTTP 202 e não aguarda classificação nem depende de Redis ou de
 provedores externos.
 
-O serviço `classification-worker` reserva jobs no PostgreSQL com `FOR UPDATE SKIP LOCKED`,
-executa o `FakeClassifier` determinístico e persiste o histórico de classificações. Leases
-expirados voltam para retry, permitindo retomada após interrupção do worker. Nesta fase não
-há chamada ao provedor de IA.
+O serviço `classification-worker` reserva jobs no PostgreSQL com `FOR UPDATE SKIP LOCKED`, chama
+o `llm-sim` sob limite global do Redis, valida a saída e persiste o histórico de classificações.
+Leases expirados voltam para retry, permitindo retomada após interrupção do worker.
 
-Os componentes isolados da integração com `llm-sim` ficam em `triagem.llm`: cliente HTTPX,
-prompt `classifier-v1`, parser de resposta e schemas Pydantic. Eles ainda não estão conectados
-ao `ClassificationWorker`; o processamento em execução continua usando somente o
-`FakeClassifier`.
+Os componentes da integração com `llm-sim` ficam em `triagem.llm`: cliente HTTPX, prompt
+`classifier-v1`, parser de resposta e schemas Pydantic. O worker compõe esses componentes por
+meio do `LLMClassifier` e envia somente assunto e mensagem ao provedor.
+
+Novas chamadas do cliente ao LLM passam por uma janela deslizante global e atômica no Redis,
+configurada por `LLM_RATE_LIMIT_RPS`. O limite de requisições simultâneas é independente e
+configurado por `LLM_MAX_CONCURRENCY`.
+
+Falhas transitórias são reagendadas no PostgreSQL com backoff exponencial e jitter. Respostas 429
+respeitam `Retry-After`; falhas permanentes de autenticação e requisição inválida encerram o job
+sem consumir todas as tentativas.
 
 ## Desenvolvimento local
 

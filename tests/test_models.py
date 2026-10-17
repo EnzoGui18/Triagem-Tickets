@@ -129,6 +129,8 @@ async def test_persists_multiple_classifications_jobs_and_alert_attempts(
         sentiment=Sentiment.NEGATIVE,
         suggested_response="Vamos verificar a entrega.",
         provider_request_id="provider-request-1",
+        provider_model="triagem-sim-1",
+        raw_output='{"categoria":"entrega"}',
     )
     second = Classification(
         ticket_id=ticket.id,
@@ -184,3 +186,5 @@ async def test_persists_multiple_classifications_jobs_and_alert_attempts(
 
     assert classification_count == 2
     assert alert_attempt_count == 2
+    assert first.provider_model == "triagem-sim-1"
+    assert first.raw_output == '{"categoria":"entrega"}'

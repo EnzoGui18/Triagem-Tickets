@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any
 
 import httpx
 from pydantic import ValidationError
 
+from triagem.llm.rate_limiter import RateLimiter
 from triagem.llm.schemas import (
     GenerateRequest,
     GenerationResult,
@@ -88,6 +91,8 @@ class LLMClient:
         api_key: str,
         model: str = "triagem-sim-1",
         timeout_seconds: float = 10.0,
+        rate_limiter: RateLimiter,
+        max_concurrency: int,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         if not base_url.strip():
@@ -98,21 +103,29 @@ class LLMClient:
             raise ValueError("model cannot be empty")
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if max_concurrency <= 0:
+            raise ValueError("max_concurrency must be positive")
 
         self._generate_url = f"{base_url.rstrip('/')}/v1/generate"
         self._api_key = api_key
         self.model = model
         self.timeout = httpx.Timeout(timeout_seconds)
+        self._rate_limiter = rate_limiter
+        self._concurrency_limiter = asyncio.Semaphore(max_concurrency)
         self._http_client = http_client
 
     async def generate(self, *, system: str, input_text: str) -> GenerationResult:
         request = GenerateRequest(model=self.model, system=system, input=input_text)
-        if self._http_client is not None:
-            response = await self._send(self._http_client, request)
-        else:
-            async with httpx.AsyncClient() as client:
-                response = await self._send(client, request)
-        return self._handle_response(response)
+        async with self._concurrency_limiter:
+            await self._rate_limiter.acquire()
+            started_at = time.perf_counter()
+            if self._http_client is not None:
+                response = await self._send(self._http_client, request)
+            else:
+                async with httpx.AsyncClient() as client:
+                    response = await self._send(client, request)
+            latency_ms = max(0, round((time.perf_counter() - started_at) * 1000))
+        return self._handle_response(response, latency_ms=latency_ms)
 
     async def _send(
         self,
@@ -131,7 +144,7 @@ class LLMClient:
         except httpx.RequestError as error:
             raise LLMTransportError("LLM provider request failed") from error
 
-    def _handle_response(self, response: httpx.Response) -> GenerationResult:
+    def _handle_response(self, response: httpx.Response, *, latency_ms: int) -> GenerationResult:
         if response.is_error:
             error_type, provider_message = _error_details(response)
             error_class: type[LLMHTTPError]
@@ -163,4 +176,5 @@ class LLMClient:
         return GenerationResult(
             **provider_response.model_dump(),
             status_code=response.status_code,
+            latency_ms=latency_ms,
         )

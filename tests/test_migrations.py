@@ -37,8 +37,19 @@ async def _domain_enum_names(database_url: str) -> set[str]:
     return names
 
 
+async def _classification_columns(database_url: str) -> set[str]:
+    test_engine = create_async_engine(database_url)
+    async with test_engine.connect() as connection:
+        columns = await connection.run_sync(
+            lambda sync_connection: inspect(sync_connection).get_columns("classifications")
+        )
+    await test_engine.dispose()
+    return {str(column["name"]) for column in columns}
+
+
 async def test_migrations_upgrade_and_downgrade(migrated_database_url: str) -> None:
     assert DOMAIN_TABLES <= await _table_names(migrated_database_url)
+    assert {"provider_model", "raw_output"} <= await _classification_columns(migrated_database_url)
 
     await run_alembic(migrated_database_url, "downgrade", "20261016_0001")
     try:

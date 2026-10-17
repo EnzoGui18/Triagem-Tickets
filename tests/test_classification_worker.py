@@ -8,7 +8,7 @@ import pytest_asyncio
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from triagem.classifiers import ClassificationResult, FakeClassifier
+from triagem.classifiers import ClassificationResult, Classifier, FakeClassifier
 from triagem.models import (
     Classification,
     ClassificationCategory,
@@ -71,7 +71,7 @@ def _worker(
     session_factory: async_sessionmaker[AsyncSession],
     worker_id: str,
     *,
-    classifier: FakeClassifier | None = None,
+    classifier: Classifier | None = None,
 ) -> ClassificationWorker:
     return ClassificationWorker(
         session_factory,

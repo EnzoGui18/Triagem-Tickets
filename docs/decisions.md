@@ -44,15 +44,16 @@ A revisão inicial do Alembic é deliberadamente vazia: ela estabelece o baselin
   manter compatibilidade com o enum e o índice criados na Fase 2.
 - Leases vencidos com tentativas restantes voltam para `retry_scheduled`; leases vencidos na
   última tentativa terminam em `failed`.
-- O `FakeClassifier` possui uma identidade versionada persistida em `classifier_versions`. A
-  criação dessa versão usa a constraint de identidade como proteção contra workers concorrentes.
+- Na Fase 5, o `FakeClassifier` possuía uma identidade versionada persistida em
+  `classifier_versions`. O mesmo mecanismo e a mesma constraint de identidade são reutilizados
+  pelo classificador real para proteger workers concorrentes.
 - Resultado da classificação e conclusão do job pertencem à mesma transação, evitando resultado
   sem conclusão ou conclusão sem histórico.
 
 ## Fronteira com o provedor de IA
 
-- A integração com `llm-sim` foi criada em módulos independentes de cliente, prompt, parser e
-  schemas. Ela permanece desconectada do `ClassificationWorker` até a fase de integração.
+- A integração com `llm-sim` permanece separada em cliente, prompt, parser e schemas. O
+  `LLMClassifier` compõe esses módulos e é a implementação usada pelo worker de produção.
 - `classifier-v1` envia somente assunto e mensagem no campo `input`. Instruções ficam em
   `system`, que declara explicitamente que o ticket é dado não confiável.
 - O parser só extrai um único objeto JSON completo. Texto externo é aceito apenas quando curto e
@@ -61,3 +62,31 @@ A revisão inicial do Alembic é deliberadamente vazia: ela estabelece o baselin
 - Erros de autenticação, requisição inválida, rate limit, falha transitória, timeout, transporte e
   resposta inválida possuem exceções de domínio distintas. A chave de API não integra mensagens
   de erro nem logs.
+
+## Limitação global de chamadas ao LLM
+
+- O limite temporal usa janela deslizante no Redis com script Lua atômico e chave compartilhada. O
+  relógio vem de `Redis TIME`, evitando decisões divergentes entre processos.
+- A janela admite no máximo `LLM_RATE_LIMIT_RPS` chamadas e inclui uma margem conservadora de 50 ms
+  para absorver a diferença entre o instante da reserva e a chegada da requisição ao provedor.
+- Quando a janela está cheia, o cliente aguarda o tempo calculado no Redis e tenta novamente. Falha
+  de Redis interrompe a tentativa; não existe fallback sem rate limiting.
+- `LLM_MAX_CONCURRENCY` limita chamadas simultâneas por instância do cliente e permanece separado
+  de `LLM_RATE_LIMIT_RPS`. O semáforo não é usado como substituto do limite distribuído.
+- A janela expira após ociosidade e contém somente estado operacional; PostgreSQL permanece a
+  fonte de verdade para dados duráveis.
+
+## Retry da classificação real
+
+- Retries não mantêm o worker bloqueado: o job volta para `retry_scheduled` com novo
+  `available_at`. `attempt_count` é incrementado na reserva e `max_attempts` limita toda execução.
+- 429 respeita `Retry-After`. Erros 500/503, timeout, rede, rate limiter indisponível e saída
+  inválida são transitórios. O atraso combina backoff exponencial, jitter de até 25% e teto
+  configurado por `CLASSIFICATION_WORKER_MAX_RETRY_DELAY_SECONDS`.
+- 401/403, requisições inválidas e outros erros HTTP permanentes falham imediatamente. Em
+  particular, `context_length_exceeded` não repete o mesmo payload.
+- Mensagens do provedor não são gravadas em `processing_jobs`; apenas códigos internos e mensagens
+  operacionais genéricas são persistidos. Isso evita copiar conteúdo não confiável ou dados
+  sensíveis para logs e campos de erro.
+- A saída bruta é preservada somente quando foi extraída e validada com sucesso. Tentativas com
+  saída inválida não criam linha parcial em `classifications`.
