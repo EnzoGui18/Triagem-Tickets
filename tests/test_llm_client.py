@@ -4,6 +4,7 @@ import json
 import httpx
 import pytest
 
+from triagem.llm.circuit_breaker import AlwaysClosedCircuitBreaker
 from triagem.llm.client import (
     LLMAuthenticationError,
     LLMClient,
@@ -48,6 +49,7 @@ async def test_client_sends_official_contract_and_captures_metadata() -> None:
             api_key="test-key",
             timeout_seconds=9,
             rate_limiter=ImmediateRateLimiter(),
+            circuit_breaker=AlwaysClosedCircuitBreaker(),
             max_concurrency=3,
             http_client=http_client,
         )
@@ -91,6 +93,7 @@ async def test_client_maps_http_failures_to_domain_errors(
             base_url="http://llm-sim:8080",
             api_key="test-key",
             rate_limiter=ImmediateRateLimiter(),
+            circuit_breaker=AlwaysClosedCircuitBreaker(),
             max_concurrency=3,
             http_client=http_client,
         )
@@ -113,6 +116,7 @@ async def test_client_maps_httpx_timeout() -> None:
             api_key="test-key",
             timeout_seconds=0.1,
             rate_limiter=ImmediateRateLimiter(),
+            circuit_breaker=AlwaysClosedCircuitBreaker(),
             max_concurrency=3,
             http_client=http_client,
         )
@@ -129,6 +133,7 @@ async def test_client_maps_httpx_connection_failure() -> None:
             base_url="http://llm-sim:8080",
             api_key="test-key",
             rate_limiter=ImmediateRateLimiter(),
+            circuit_breaker=AlwaysClosedCircuitBreaker(),
             max_concurrency=3,
             http_client=http_client,
         )
@@ -145,6 +150,7 @@ async def test_client_rejects_invalid_success_response() -> None:
             base_url="http://llm-sim:8080",
             api_key="test-key",
             rate_limiter=ImmediateRateLimiter(),
+            circuit_breaker=AlwaysClosedCircuitBreaker(),
             max_concurrency=3,
             http_client=http_client,
         )
@@ -173,6 +179,7 @@ async def test_client_limits_concurrent_requests_separately_from_rate() -> None:
             base_url="http://llm-sim:8080",
             api_key="test-key",
             rate_limiter=ImmediateRateLimiter(),
+            circuit_breaker=AlwaysClosedCircuitBreaker(),
             max_concurrency=2,
             http_client=http_client,
         )

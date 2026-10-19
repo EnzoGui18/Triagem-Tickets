@@ -7,6 +7,12 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
+from triagem.llm.circuit_breaker import (
+    CircuitBreaker,
+    CircuitBreakerError,
+    CircuitPermit,
+    CircuitProbeFailureError,
+)
 from triagem.llm.rate_limiter import RateLimiter
 from triagem.llm.schemas import (
     GenerateRequest,
@@ -92,6 +98,7 @@ class LLMClient:
         model: str = "triagem-sim-1",
         timeout_seconds: float = 10.0,
         rate_limiter: RateLimiter,
+        circuit_breaker: CircuitBreaker,
         max_concurrency: int,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -111,6 +118,7 @@ class LLMClient:
         self.model = model
         self.timeout = httpx.Timeout(timeout_seconds)
         self._rate_limiter = rate_limiter
+        self._circuit_breaker = circuit_breaker
         self._concurrency_limiter = asyncio.Semaphore(max_concurrency)
         self._http_client = http_client
 
@@ -118,14 +126,43 @@ class LLMClient:
         request = GenerateRequest(model=self.model, system=system, input=input_text)
         async with self._concurrency_limiter:
             await self._rate_limiter.acquire()
+            permit = await self._circuit_breaker.acquire()
             started_at = time.perf_counter()
-            if self._http_client is not None:
-                response = await self._send(self._http_client, request)
-            else:
-                async with httpx.AsyncClient() as client:
-                    response = await self._send(client, request)
-            latency_ms = max(0, round((time.perf_counter() - started_at) * 1000))
-        return self._handle_response(response, latency_ms=latency_ms)
+            try:
+                if self._http_client is not None:
+                    response = await self._send(self._http_client, request)
+                else:
+                    async with httpx.AsyncClient() as client:
+                        response = await self._send(client, request)
+                latency_ms = max(0, round((time.perf_counter() - started_at) * 1000))
+                result = self._handle_response(response, latency_ms=latency_ms)
+            except (LLMTransientProviderError, LLMTransportError) as error:
+                await self._record_failure(permit)
+                if permit.is_probe:
+                    raise CircuitProbeFailureError(
+                        retry_after_seconds=self._circuit_breaker.recovery_timeout_seconds
+                    ) from error
+                raise
+            except Exception:
+                await self._record_success(permit)
+                raise
+            await self._record_success(permit)
+            return result
+
+    async def _record_success(self, permit: CircuitPermit) -> None:
+        try:
+            await self._circuit_breaker.record_success(permit)
+        except CircuitBreakerError:
+            # The provider result remains authoritative for this attempt. A later acquire
+            # still fails closed if Redis coordination remains unavailable.
+            return
+
+    async def _record_failure(self, permit: CircuitPermit) -> None:
+        try:
+            await self._circuit_breaker.record_failure(permit)
+        except CircuitBreakerError:
+            # Preserve the original provider failure and let the durable job retry it.
+            return
 
     async def _send(
         self,

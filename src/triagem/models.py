@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from enum import Enum, StrEnum
 from uuid import UUID, uuid4
 
@@ -11,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     SmallInteger,
     String,
     Text,
@@ -172,6 +174,19 @@ class Classification(Base):
             "provider_latency_ms IS NULL OR provider_latency_ms >= 0",
             name="ck_provider_latency_ms",
         ),
+        CheckConstraint(
+            "(input_cost IS NULL AND output_cost IS NULL AND total_cost IS NULL) OR "
+            "(input_cost IS NOT NULL AND output_cost IS NOT NULL AND total_cost IS NOT NULL)",
+            name="ck_classification_costs_complete",
+        ),
+        CheckConstraint(
+            "input_cost IS NULL OR (input_cost >= 0 AND output_cost >= 0 AND total_cost >= 0)",
+            name="ck_classification_costs_nonnegative",
+        ),
+        CheckConstraint(
+            "total_cost IS NULL OR total_cost = input_cost + output_cost",
+            name="ck_classification_total_cost",
+        ),
         Index("ix_classifications_ticket_id", "ticket_id"),
         Index("ix_classifications_classifier_version_id", "classifier_version_id"),
         Index("ix_classifications_created_at", "created_at"),
@@ -219,6 +234,9 @@ class Classification(Base):
     raw_output: Mapped[str | None] = mapped_column(Text)
     input_tokens: Mapped[int | None] = mapped_column(Integer)
     output_tokens: Mapped[int | None] = mapped_column(Integer)
+    input_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    output_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    total_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     provider_latency_ms: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

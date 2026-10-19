@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import PositiveInt, SecretStr
+from pydantic import PositiveFloat, PositiveInt, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 10.0
     llm_rate_limit_rps: PositiveInt = 5
     llm_max_concurrency: PositiveInt = 5
+    llm_circuit_breaker_failure_threshold: PositiveInt = 2
+    llm_circuit_breaker_recovery_timeout_seconds: PositiveFloat = 10.0
     classification_worker_lease_seconds: float = 30.0
     classification_worker_retry_delay_seconds: float = 5.0
     classification_worker_max_retry_delay_seconds: float = 300.0

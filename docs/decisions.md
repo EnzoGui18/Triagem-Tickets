@@ -49,6 +49,11 @@ A revisão inicial do Alembic é deliberadamente vazia: ela estabelece o baselin
   pelo classificador real para proteger workers concorrentes.
 - Resultado da classificação e conclusão do job pertencem à mesma transação, evitando resultado
   sem conclusão ou conclusão sem histórico.
+- Uma reclassificação cria uma nova linha e um novo vínculo com `classifier_versions`; a linha
+  anterior nunca é atualizada ou reutilizada como resultado do novo job.
+- A combinação de provedor, modelo e versão identifica uma definição imutável. Reutilizar essa
+  identidade com prompt ou schema diferente falha antes da chamada ao LLM, em vez de associar a
+  nova classificação a metadados incorretos.
 
 ## Fronteira com o provedor de IA
 
@@ -90,3 +95,32 @@ A revisão inicial do Alembic é deliberadamente vazia: ela estabelece o baselin
   sensíveis para logs e campos de erro.
 - A saída bruta é preservada somente quando foi extraída e validada com sucesso. Tentativas com
   saída inválida não criam linha parcial em `classifications`.
+
+## Circuit breaker do provedor de IA
+
+- O estado do circuito é global entre workers e fica no Redis sob uma chave com TTL. Ele é apenas
+  coordenação operacional; tickets e jobs continuam duráveis exclusivamente no PostgreSQL.
+- Timeout, falha de rede e HTTP 5xx contam como indisponibilidade. 429, erros permanentes e saída
+  inválida indicam que o provedor respondeu e, portanto, não abrem o circuito.
+- As transições `closed` → `open` → `half_open` são atômicas. Um número de geração impede que uma
+  resposta atrasada de uma chamada anterior sobrescreva um estado mais novo, e somente um worker
+  recebe a permissão de probe em `half_open`.
+- Job recusado em `open` não realizou chamada ao provedor e não consome `attempt_count`. Uma falha
+  do probe coordenado também não esgota o job usado para testar a recuperação; ele permanece
+  reagendado no PostgreSQL até a próxima janela. Chamadas normais em `closed` continuam limitadas
+  por `max_attempts`.
+- O mesmo tratamento sem consumo de tentativa é aplicado quando Redis impede rate limiting ou
+  circuit breaking seguro, pois nenhuma chamada ao LLM foi iniciada.
+
+## Custos de classificação
+
+- Os preços são constantes explícitas em `Decimal`: US$ 0,40 por milhão de tokens de entrada e
+  US$ 1,60 por milhão de tokens de saída. Nenhum cálculo financeiro utiliza `float`.
+- `input_cost`, `output_cost` e `total_cost` usam `NUMERIC(20, 8)` no PostgreSQL. Oito casas
+  decimais preservam exatamente o resultado das fórmulas atuais, cujos preços têm duas casas e
+  cujo divisor é um milhão.
+- Novas classificações sempre recebem os três custos. A migration recalcula registros históricos
+  que já possuem ambos os contadores de tokens; registros legados sem usage permanecem com o trio
+  nulo para não representar custo desconhecido como zero.
+- Constraints exigem que os três custos estejam todos presentes ou todos ausentes, sejam não
+  negativos e que `total_cost` seja exatamente a soma dos componentes.

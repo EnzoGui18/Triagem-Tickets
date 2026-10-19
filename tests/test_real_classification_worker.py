@@ -1,6 +1,7 @@
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 import httpx
@@ -10,6 +11,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from triagem.classifiers import ClassificationResult, FakeClassifier, LLMClassifier
+from triagem.llm.circuit_breaker import AlwaysClosedCircuitBreaker
 from triagem.llm.client import LLMClient
 from triagem.models import (
     Classification,
@@ -113,6 +115,7 @@ def _real_worker(
         base_url="http://llm-sim:8080",
         api_key="test-key",
         rate_limiter=ImmediateRateLimiter(),
+        circuit_breaker=AlwaysClosedCircuitBreaker(),
         max_concurrency=2,
         http_client=http_client,
     )
@@ -191,6 +194,9 @@ async def test_real_worker_retries_then_persists_provider_result(
     assert classification.raw_output == valid_output
     assert classification.input_tokens == 31
     assert classification.output_tokens == 12
+    assert classification.input_cost == Decimal("0.00001240")
+    assert classification.output_cost == Decimal("0.00001920")
+    assert classification.total_cost == Decimal("0.00003160")
     assert classification.provider_latency_ms is not None
     assert classification.provider_latency_ms >= 0
     assert classification.created_at is not None

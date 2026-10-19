@@ -17,10 +17,17 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from triagem.classification_costs import calculate_classification_costs
 from triagem.classifiers import ClassificationResult, Classifier, LLMClassifier
 from triagem.core.config import get_settings
 from triagem.core.database import async_session_factory, engine
 from triagem.core.redis import redis_client
+from triagem.llm.circuit_breaker import (
+    CircuitBreakerError,
+    CircuitOpenError,
+    CircuitProbeFailureError,
+    RedisCircuitBreaker,
+)
 from triagem.llm.client import (
     LLMAuthenticationError,
     LLMClient,
@@ -60,6 +67,11 @@ class FailurePolicy:
     retryable: bool
     error_code: str
     retry_after_seconds: float | None = None
+    consume_attempt: bool = True
+
+
+class ClassifierVersionConflictError(Exception):
+    """A version label was reused with a different immutable definition."""
 
 
 def _retry_after_seconds(value: str | None, now: datetime) -> float | None:
@@ -81,6 +93,28 @@ def _retry_after_seconds(value: str | None, now: datetime) -> float | None:
 
 
 def _failure_policy(error: Exception, now: datetime) -> FailurePolicy:
+    if isinstance(error, ClassifierVersionConflictError):
+        return FailurePolicy(retryable=False, error_code="classifier_version_conflict")
+    if isinstance(error, CircuitOpenError):
+        return FailurePolicy(
+            retryable=True,
+            error_code="llm_circuit_open",
+            retry_after_seconds=error.retry_after_seconds,
+            consume_attempt=False,
+        )
+    if isinstance(error, CircuitProbeFailureError):
+        return FailurePolicy(
+            retryable=True,
+            error_code="llm_circuit_probe_failed",
+            retry_after_seconds=error.retry_after_seconds,
+            consume_attempt=False,
+        )
+    if isinstance(error, CircuitBreakerError):
+        return FailurePolicy(
+            retryable=True,
+            error_code="circuit_breaker_unavailable",
+            consume_attempt=False,
+        )
     if isinstance(error, LLMRateLimitError):
         return FailurePolicy(
             retryable=True,
@@ -107,7 +141,11 @@ def _failure_policy(error: Exception, now: datetime) -> FailurePolicy:
     if isinstance(error, LLMHTTPError):
         return FailurePolicy(retryable=False, error_code=f"llm_http_{error.status_code}")
     if isinstance(error, RateLimiterError):
-        return FailurePolicy(retryable=True, error_code="rate_limiter_unavailable")
+        return FailurePolicy(
+            retryable=True,
+            error_code="rate_limiter_unavailable",
+            consume_attempt=False,
+        )
     return FailurePolicy(retryable=True, error_code="classification_unexpected_error")
 
 
@@ -198,6 +236,7 @@ class ClassificationWorker:
             return False
 
         try:
+            classifier_version_id = await self._resolve_classifier_version_id()
             ticket = await self._load_ticket(reserved_job.ticket_id)
             result = await self._classifier.classify(ticket)
         except Exception as error:
@@ -211,7 +250,11 @@ class ClassificationWorker:
                 )
             return True
 
-        classification_id = await self._complete_job(reserved_job, result)
+        classification_id = await self._complete_job(
+            reserved_job,
+            result,
+            classifier_version_id,
+        )
         if classification_id is None:
             logger.info(
                 "classification_job_lease_lost job_id=%s worker_id=%s",
@@ -295,6 +338,7 @@ class ClassificationWorker:
         self,
         reserved_job: ReservedJob,
         result: ClassificationResult,
+        classifier_version_id: UUID,
     ) -> UUID | None:
         async with self._session_factory() as session, session.begin():
             job = await self._owned_job(session, reserved_job)
@@ -304,7 +348,10 @@ class ClassificationWorker:
             now = await session.scalar(select(func.clock_timestamp()))
             if now is None:  # pragma: no cover - PostgreSQL always returns a value
                 raise RuntimeError("database clock is unavailable")
-            classifier_version_id = await self._classifier_version_id(session)
+            costs = calculate_classification_costs(
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+            )
             classification = Classification(
                 ticket_id=job.ticket_id,
                 classifier_version_id=classifier_version_id,
@@ -317,6 +364,9 @@ class ClassificationWorker:
                 raw_output=result.raw_output,
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,
+                input_cost=costs.input_cost,
+                output_cost=costs.output_cost,
+                total_cost=costs.total_cost,
                 provider_latency_ms=result.provider_latency_ms,
             )
             session.add(classification)
@@ -345,6 +395,8 @@ class ClassificationWorker:
             if now is None:  # pragma: no cover - PostgreSQL always returns a value
                 raise RuntimeError("database clock is unavailable")
             policy = _failure_policy(error, now)
+            if not policy.consume_attempt:
+                job.attempt_count = max(0, job.attempt_count - 1)
             job.locked_at = None
             job.locked_by = None
             job.last_error_code = policy.error_code
@@ -409,6 +461,10 @@ class ClassificationWorker:
             .with_for_update()
         )
 
+    async def _resolve_classifier_version_id(self) -> UUID:
+        async with self._session_factory() as session, session.begin():
+            return await self._classifier_version_id(session)
+
     async def _classifier_version_id(self, session: AsyncSession) -> UUID:
         identity = self._classifier.identity
         inserted_id = await session.scalar(
@@ -426,16 +482,23 @@ class ClassificationWorker:
         if inserted_id is not None:
             return inserted_id
 
-        existing_id = await session.scalar(
-            select(ClassifierVersion.id).where(
+        existing = await session.scalar(
+            select(ClassifierVersion).where(
                 ClassifierVersion.provider == identity.provider,
                 ClassifierVersion.model_name == identity.model_name,
                 ClassifierVersion.version == identity.version,
             )
         )
-        if existing_id is None:  # pragma: no cover - protected by the unique constraint
+        if existing is None:  # pragma: no cover - protected by the unique constraint
             raise RuntimeError("classifier version could not be resolved")
-        return existing_id
+        if (
+            existing.system_prompt != identity.system_prompt
+            or existing.output_schema_version != identity.output_schema_version
+        ):
+            raise ClassifierVersionConflictError(
+                "classifier version identity conflicts with its stored definition"
+            )
+        return existing.id
 
 
 def _worker_id() -> str:
@@ -450,12 +513,20 @@ async def _run_worker() -> None:
                 redis_client,
                 rate_per_second=settings.llm_rate_limit_rps,
             )
+            circuit_breaker = RedisCircuitBreaker(
+                redis_client,
+                failure_threshold=settings.llm_circuit_breaker_failure_threshold,
+                recovery_timeout_seconds=(
+                    settings.llm_circuit_breaker_recovery_timeout_seconds
+                ),
+            )
             llm_client = LLMClient(
                 base_url=settings.llm_base_url,
                 api_key=settings.llm_api_key.get_secret_value(),
                 model=settings.llm_model,
                 timeout_seconds=settings.llm_timeout_seconds,
                 rate_limiter=rate_limiter,
+                circuit_breaker=circuit_breaker,
                 max_concurrency=settings.llm_max_concurrency,
                 http_client=http_client,
             )

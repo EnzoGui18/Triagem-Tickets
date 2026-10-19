@@ -43,9 +43,18 @@ Novas chamadas do cliente ao LLM passam por uma janela deslizante global e atôm
 configurada por `LLM_RATE_LIMIT_RPS`. O limite de requisições simultâneas é independente e
 configurado por `LLM_MAX_CONCURRENCY`.
 
+Falhas de disponibilidade do LLM alimentam um circuit breaker distribuído no Redis. Após o limiar
+configurado, o circuito abre e os jobs permanecem reagendados no PostgreSQL sem novas chamadas ao
+provedor. Depois do intervalo de recuperação, um único worker executa o probe em `half_open`; o
+sucesso fecha o circuito e o processamento é retomado automaticamente.
+
 Falhas transitórias são reagendadas no PostgreSQL com backoff exponencial e jitter. Respostas 429
 respeitam `Retry-After`; falhas permanentes de autenticação e requisição inválida encerram o job
 sem consumir todas as tentativas.
+
+Cada classificação preserva a versão exata do classificador, os tokens de entrada e saída e os
+custos calculados com `Decimal`. Reclassificações criam novas linhas e mantêm intacto o histórico
+anterior.
 
 ## Desenvolvimento local
 

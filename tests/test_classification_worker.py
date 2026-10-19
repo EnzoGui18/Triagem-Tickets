@@ -8,10 +8,17 @@ import pytest_asyncio
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from triagem.classifiers import ClassificationResult, Classifier, FakeClassifier
+from triagem.classifiers import (
+    ClassificationResult,
+    Classifier,
+    ClassifierIdentity,
+    FakeClassifier,
+)
+from triagem.llm.circuit_breaker import CircuitOpenError, CircuitProbeFailureError
 from triagem.models import (
     Classification,
     ClassificationCategory,
+    ClassifierVersion,
     JobStatus,
     JobType,
     ProcessingJob,
@@ -65,6 +72,24 @@ async def _enqueue_job(
         session.add(job)
         await session.flush()
         return job.id, ticket.id
+
+
+async def _enqueue_reclassification_job(
+    session_factory: async_sessionmaker[AsyncSession],
+    ticket_id: UUID,
+) -> UUID:
+    async with session_factory() as session, session.begin():
+        now = await session.scalar(select(func.clock_timestamp()))
+        assert now is not None
+        job = ProcessingJob(
+            ticket_id=ticket_id,
+            job_type=JobType.CLASSIFICATION,
+            queue_priority=10,
+            available_at=now - timedelta(seconds=1),
+        )
+        session.add(job)
+        await session.flush()
+        return job.id
 
 
 def _worker(
@@ -187,6 +212,46 @@ class BlockingFakeClassifier(FakeClassifier):
         return await super().classify(ticket)
 
 
+class CircuitDeferringClassifier(FakeClassifier):
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def classify(self, ticket: Ticket) -> ClassificationResult:
+        del ticket
+        raise self._error
+
+
+class VersionedFakeClassifier(FakeClassifier):
+    def __init__(
+        self,
+        *,
+        version: str,
+        category: ClassificationCategory,
+        priority: TicketPriority,
+        system_prompt: str | None = None,
+    ) -> None:
+        self.identity = ClassifierIdentity(
+            provider="version-test",
+            model_name="versioned-fake",
+            version=version,
+            system_prompt=system_prompt or f"prompt-{version}",
+            output_schema_version="1",
+        )
+        self._category = category
+        self._priority = priority
+
+    async def classify(self, ticket: Ticket) -> ClassificationResult:
+        del ticket
+        return ClassificationResult(
+            category=self._category,
+            priority=self._priority,
+            sentiment=Sentiment.NEUTRAL,
+            suggested_response=f"Resposta da versão {self.identity.version}.",
+            input_tokens=10,
+            output_tokens=5,
+        )
+
+
 async def test_stale_worker_cannot_complete_after_lease_is_reassigned(
     worker_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -265,6 +330,171 @@ async def test_retry_can_be_resumed_by_a_new_worker_instance(
     assert classification.category == ClassificationCategory.OTHER
     assert classification.priority == TicketPriority.MEDIUM
     assert classification.sentiment == Sentiment.NEUTRAL
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_code"),
+    [
+        (CircuitOpenError(retry_after_seconds=12), "llm_circuit_open"),
+        (
+            CircuitProbeFailureError(retry_after_seconds=12),
+            "llm_circuit_probe_failed",
+        ),
+    ],
+)
+async def test_circuit_deferral_does_not_consume_job_attempt(
+    error: Exception,
+    expected_code: str,
+    worker_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    job_id, _ = await _enqueue_job(
+        worker_session_factory,
+        f"worker-circuit-deferral-{uuid4()}",
+    )
+    worker = _worker(
+        worker_session_factory,
+        "worker-circuit-open",
+        classifier=CircuitDeferringClassifier(error),
+    )
+
+    assert await worker.run_once() is True
+
+    async with worker_session_factory() as session:
+        job = await session.get(ProcessingJob, job_id)
+
+    assert job is not None
+    assert job.status == JobStatus.RETRY_SCHEDULED
+    assert job.attempt_count == 0
+    assert job.last_error_code == expected_code
+    assert (job.available_at - job.updated_at).total_seconds() >= 12
+
+
+async def test_reclassification_preserves_history_and_exact_classifier_version(
+    worker_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    first_job_id, ticket_id = await _enqueue_job(
+        worker_session_factory,
+        f"worker-reclassification-{uuid4()}",
+    )
+    first_worker = _worker(
+        worker_session_factory,
+        "worker-classifier-v1",
+        classifier=VersionedFakeClassifier(
+            version="v1",
+            category=ClassificationCategory.OTHER,
+            priority=TicketPriority.MEDIUM,
+        ),
+    )
+    assert await first_worker.run_once() is True
+
+    second_job_id = await _enqueue_reclassification_job(
+        worker_session_factory,
+        ticket_id,
+    )
+
+    second_worker = _worker(
+        worker_session_factory,
+        "worker-classifier-v2",
+        classifier=VersionedFakeClassifier(
+            version="v2",
+            category=ClassificationCategory.DELIVERY,
+            priority=TicketPriority.HIGH,
+        ),
+    )
+    assert await second_worker.run_once() is True
+
+    async with worker_session_factory() as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(Classification, ClassifierVersion)
+                    .join(
+                        ClassifierVersion,
+                        Classification.classifier_version_id == ClassifierVersion.id,
+                    )
+                    .where(Classification.ticket_id == ticket_id)
+                    .order_by(ClassifierVersion.version)
+                )
+            ).all()
+        )
+        jobs = list(
+            (
+                await session.scalars(
+                    select(ProcessingJob).where(
+                        ProcessingJob.id.in_([first_job_id, second_job_id])
+                    )
+                )
+            ).all()
+        )
+
+    assert len(rows) == 2
+    first_classification, first_version = rows[0]
+    second_classification, second_version = rows[1]
+    assert first_classification.id != second_classification.id
+    assert first_version.version == "v1"
+    assert first_classification.category == ClassificationCategory.OTHER
+    assert second_version.version == "v2"
+    assert second_classification.category == ClassificationCategory.DELIVERY
+    assert {job.status for job in jobs} == {JobStatus.COMPLETED}
+    assert {job.classification_id for job in jobs} == {
+        first_classification.id,
+        second_classification.id,
+    }
+
+
+async def test_classifier_version_identity_cannot_change_its_definition(
+    worker_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    _, ticket_id = await _enqueue_job(
+        worker_session_factory,
+        f"worker-version-conflict-{uuid4()}",
+    )
+    original_worker = _worker(
+        worker_session_factory,
+        "worker-original-version",
+        classifier=VersionedFakeClassifier(
+            version="immutable-v1",
+            category=ClassificationCategory.OTHER,
+            priority=TicketPriority.MEDIUM,
+        ),
+    )
+    assert await original_worker.run_once() is True
+
+    conflicting_job_id = await _enqueue_reclassification_job(
+        worker_session_factory,
+        ticket_id,
+    )
+    conflicting_worker = _worker(
+        worker_session_factory,
+        "worker-conflicting-version",
+        classifier=VersionedFakeClassifier(
+            version="immutable-v1",
+            category=ClassificationCategory.DELIVERY,
+            priority=TicketPriority.HIGH,
+            system_prompt="changed-without-version-bump",
+        ),
+    )
+    assert await conflicting_worker.run_once() is True
+
+    async with worker_session_factory() as session:
+        conflicting_job = await session.get(ProcessingJob, conflicting_job_id)
+        classification_count = await session.scalar(
+            select(func.count(Classification.id)).where(Classification.ticket_id == ticket_id)
+        )
+        version = await session.scalar(
+            select(ClassifierVersion).where(
+                ClassifierVersion.provider == "version-test",
+                ClassifierVersion.model_name == "versioned-fake",
+                ClassifierVersion.version == "immutable-v1",
+            )
+        )
+
+    assert conflicting_job is not None
+    assert conflicting_job.status == JobStatus.FAILED
+    assert conflicting_job.last_error_code == "classifier_version_conflict"
+    assert classification_count == 1
+    assert version is not None
+    assert version.system_prompt == "prompt-immutable-v1"
 
 
 async def test_job_fails_after_reaching_max_attempts(

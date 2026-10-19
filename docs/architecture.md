@@ -40,6 +40,20 @@ cálculo da taxa temporal.
 O estado da janela possui TTL e é apenas coordenação operacional. Tickets, jobs e classificações
 continuam armazenados exclusivamente no PostgreSQL.
 
+## Circuit breaker do LLM
+
+O cliente compartilha no Redis um circuit breaker com estados `closed`, `open` e `half_open`.
+Falhas de transporte, timeout e HTTP 5xx contam para a abertura. Respostas que comprovam que o
+provedor está acessível — inclusive 4xx e respostas 2xx inválidas — não caracterizam outage. O
+estado e suas transições usam scripts Lua atômicos e o relógio do Redis, de modo que todos os
+workers observam o mesmo circuito e somente um deles executa o probe em `half_open`.
+
+Enquanto o circuito está aberto, o worker mantém o job no PostgreSQL e apenas atualiza
+`available_at`; nenhuma chamada ao provedor é feita. A recusa em `open` e uma falha do probe em
+`half_open` não consomem o limite de tentativas do job. Isso permite atravessar uma indisponibilidade
+prolongada sem transformar o circuit breaker em fila ou mecanismo de durabilidade. Um probe bem
+sucedido fecha o circuito e a classificação correspondente é persistida normalmente.
+
 ## Job engine de classificação
 
 O `classification-worker` usa exclusivamente o PostgreSQL como fila durável. Em uma transação
@@ -51,13 +65,15 @@ Depois da reserva, o worker chama o `llm-sim` por meio do rate limiter global, e
 resposta e persiste a classificação. A classificação, o vínculo
 `processing_jobs.classification_id`, a conclusão do job e a atualização do ticket são confirmados
 na mesma transação. A linha registra versão do classificador, id e modelo da geração, saída bruta,
-tokens, latência e resultado validado.
+tokens, custos, latência e resultado validado. Os custos de entrada e saída são calculados com
+`Decimal` a partir do usage validado e o custo total é a soma exata dos dois componentes.
 
-Falhas 429, 500, 503, timeout, rede, indisponibilidade do rate limiter e saída inválida são
-reagendadas por `available_at`, limitadas por `max_attempts`. O atraso usa backoff exponencial com
-jitter e teto configurável; `Retry-After` prevalece quando maior. Autenticação inválida, erros HTTP
-permanentes e requisições inválidas — incluindo excesso de contexto — encerram o job. O worker não
-dorme durante o backoff.
+Falhas 429, 500, 503, timeout, rede e saída inválida são reagendadas por `available_at`, limitadas
+por `max_attempts`. Indisponibilidade do rate limiter ou do circuit breaker também reagenda o
+job, mas não consome tentativa porque nenhuma chamada ao provedor ocorreu. O atraso usa backoff
+exponencial com jitter e teto configurável; `Retry-After` prevalece quando maior. Autenticação
+inválida, erros HTTP permanentes e requisições inválidas — incluindo excesso de contexto — encerram
+o job. O worker não dorme durante o backoff.
 
 Antes de reservar, o worker recupera jobs `processing` cujo lease expirou. Se ainda houver
 tentativas, eles retornam a `retry_scheduled`; se o limite tiver sido atingido, passam para
@@ -76,6 +92,10 @@ O PostgreSQL contém cinco entidades principais:
 - `alert_deliveries`: uma linha por tentativa de entrega, preservando payload, resultado e erro.
 
 Jobs de alerta podem referenciar a classificação que os originou. Isso separa retry de entrega de uma nova execução da IA. Foreign keys usam `RESTRICT` para impedir a remoção acidental de histórico.
+
+Cada classificação referencia obrigatoriamente a linha de `classifier_versions` correspondente ao
+provedor, modelo e versão que a produziu. Uma reclassificação cria outro job e outra linha em
+`classifications`; o resultado anterior e sua versão permanecem imutáveis.
 
 ## Ingestão
 

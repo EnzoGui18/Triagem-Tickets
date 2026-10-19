@@ -34,11 +34,11 @@ class ClassificationResult:
     priority: TicketPriority
     sentiment: Sentiment
     suggested_response: str
+    input_tokens: int
+    output_tokens: int
     provider_request_id: str | None = None
     provider_model: str | None = None
     raw_output: str | None = None
-    input_tokens: int | None = None
-    output_tokens: int | None = None
     provider_latency_ms: int | None = None
 
 
