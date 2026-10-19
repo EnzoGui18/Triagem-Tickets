@@ -124,3 +124,31 @@ A revisão inicial do Alembic é deliberadamente vazia: ela estabelece o baselin
   nulo para não representar custo desconhecido como zero.
 - Constraints exigem que os três custos estejam todos presentes ou todos ausentes, sejam não
   negativos e que `total_cost` seja exatamente a soma dos componentes.
+
+## Leitura e filtragem de tickets
+
+- A classificação atual é a última por `created_at`, com `id` como desempate determinístico. O
+  histórico permanece preservado e nenhuma linha é marcada ou sobrescrita para representar esse
+  conceito derivado.
+- Filtros de categoria e prioridade se aplicam apenas à classificação atual. O período se aplica a
+  `tickets.received_at`, usando limites inclusivos e timestamps com fuso horário.
+- Filtragem, contagem e paginação permanecem no PostgreSQL. Os índices existentes de recebimento,
+  categoria e prioridade atendem esta fase, portanto não foi criada uma migration adicional.
+
+## Entrega de alertas urgentes
+
+- Classificação urgente, tentativa inicial `pending` e job de alerta pertencem à mesma transação.
+  Nenhum HTTP para o plantão ocorre antes desse commit.
+- O resumo é uma normalização determinística de assunto e mensagem, truncada em 280 caracteres.
+  Não há nova chamada ao LLM para gerar texto de alerta.
+- O desenho de uma linha por tentativa em `alert_deliveries` foi preservado. `attempt_number` e
+  `processing_jobs.attempt_count` registram a contagem; `attempted_at` em cada linha permite obter
+  `first_attempt_at` e `last_attempt_at` por `MIN/MAX`; `provider_request_id` armazena o
+  `provider_alert_id` quando o plantão o fornece.
+- 202 conclui a entrega. 503, timeout, rede e demais 5xx são transitórios e usam reagendamento no
+  PostgreSQL. 422 e demais 4xx são falhas permanentes. O worker não dorme durante o backoff.
+- A entrega é **at-least-once**. Uma falha entre o aceite remoto e o commit local pode causar nova
+  entrega após expiração do lease. Como o plantão não oferece chave de idempotência, exactly-once
+  não é prometido.
+- Falhas e retries de alerta operam apenas no job `alert_delivery`; nunca criam nova classificação
+  nem retornam o job de classificação para processamento.

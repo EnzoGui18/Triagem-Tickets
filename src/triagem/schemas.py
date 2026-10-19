@@ -11,9 +11,16 @@ from pydantic import (
     Field,
     StringConstraints,
     field_validator,
+    model_validator,
 )
 
-from triagem.models import TicketStatus
+from triagem.models import (
+    ClassificationCategory,
+    JobStatus,
+    Sentiment,
+    TicketPriority,
+    TicketStatus,
+)
 
 ExternalId = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)
@@ -63,3 +70,90 @@ class TicketAcceptedResponse(BaseModel):
     external_id: str
     status: TicketStatus
     received_at: datetime = Field(serialization_alias="recebido_em")
+
+
+class TicketListFilters(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    category: ClassificationCategory | None = Field(default=None, alias="categoria")
+    priority: TicketPriority | None = Field(default=None, alias="prioridade")
+    received_from: datetime | None = Field(default=None, alias="inicio")
+    received_until: datetime | None = Field(default=None, alias="fim")
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=20, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def validate_period(self) -> TicketListFilters:
+        for field_name, value in (
+            ("inicio", self.received_from),
+            ("fim", self.received_until),
+        ):
+            if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+                raise ValueError(f"{field_name} deve conter fuso horário")
+        if (
+            self.received_from is not None
+            and self.received_until is not None
+            and self.received_from > self.received_until
+        ):
+            raise ValueError("inicio deve ser anterior ou igual a fim")
+        return self
+
+
+class TicketCustomerResponse(BaseModel):
+    external_id: str = Field(serialization_alias="id")
+    name: str = Field(serialization_alias="nome")
+    email: EmailStr
+
+
+class TicketClassificationResponse(BaseModel):
+    id: UUID
+    category: ClassificationCategory = Field(serialization_alias="categoria")
+    priority: TicketPriority = Field(serialization_alias="prioridade")
+    sentiment: Sentiment = Field(serialization_alias="sentimento")
+    suggested_response: str = Field(serialization_alias="sugestao_resposta")
+    created_at: datetime = Field(serialization_alias="criado_em")
+
+
+class TicketProcessingResponse(BaseModel):
+    job_id: UUID
+    status: JobStatus
+    attempt_count: int = Field(serialization_alias="tentativas")
+    max_attempts: int = Field(serialization_alias="max_tentativas")
+    available_at: datetime = Field(serialization_alias="disponivel_em")
+
+
+class TicketDetailResponse(BaseModel):
+    id: UUID
+    external_id: str
+    customer: TicketCustomerResponse = Field(serialization_alias="cliente")
+    subject: str = Field(serialization_alias="assunto")
+    message: str = Field(serialization_alias="mensagem")
+    channel: str = Field(serialization_alias="canal")
+    source_created_at: datetime = Field(serialization_alias="criado_em")
+    received_at: datetime = Field(serialization_alias="recebido_em")
+    status: TicketStatus
+    current_classification: TicketClassificationResponse | None = Field(
+        serialization_alias="classificacao_atual"
+    )
+    processing: TicketProcessingResponse | None = Field(serialization_alias="processamento")
+
+
+class TicketListItemResponse(BaseModel):
+    id: UUID
+    external_id: str
+    subject: str = Field(serialization_alias="assunto")
+    channel: str = Field(serialization_alias="canal")
+    source_created_at: datetime = Field(serialization_alias="criado_em")
+    received_at: datetime = Field(serialization_alias="recebido_em")
+    status: TicketStatus
+    current_classification: TicketClassificationResponse | None = Field(
+        serialization_alias="classificacao_atual"
+    )
+
+
+class TicketListResponse(BaseModel):
+    items: list[TicketListItemResponse]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int

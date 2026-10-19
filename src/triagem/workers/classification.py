@@ -17,6 +17,7 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from triagem.alerting import build_alert_payload
 from triagem.classification_costs import calculate_classification_costs
 from triagem.classifiers import ClassificationResult, Classifier, LLMClassifier
 from triagem.core.config import get_settings
@@ -42,12 +43,15 @@ from triagem.llm.client import (
 from triagem.llm.parser import LLMOutputError
 from triagem.llm.rate_limiter import RateLimiterError, RedisSlidingWindowRateLimiter
 from triagem.models import (
+    AlertDelivery,
+    AlertDeliveryStatus,
     Classification,
     ClassifierVersion,
     JobStatus,
     JobType,
     ProcessingJob,
     Ticket,
+    TicketPriority,
     TicketStatus,
 )
 
@@ -368,9 +372,37 @@ class ClassificationWorker:
                 output_cost=costs.output_cost,
                 total_cost=costs.total_cost,
                 provider_latency_ms=result.provider_latency_ms,
+                created_at=now,
             )
             session.add(classification)
             await session.flush()
+
+            if result.priority == TicketPriority.URGENT:
+                ticket = await session.get(Ticket, job.ticket_id)
+                if ticket is None:  # pragma: no cover - protected by the job foreign key
+                    raise RuntimeError("job ticket was not found")
+                alert_payload = build_alert_payload(
+                    ticket,
+                    category=result.category,
+                    detected_at=now,
+                )
+                session.add_all(
+                    [
+                        AlertDelivery(
+                            classification_id=classification.id,
+                            attempt_number=1,
+                            status=AlertDeliveryStatus.PENDING,
+                            request_payload=alert_payload.model_dump(mode="json", by_alias=True),
+                        ),
+                        ProcessingJob(
+                            ticket_id=job.ticket_id,
+                            classification_id=classification.id,
+                            job_type=JobType.ALERT_DELIVERY,
+                            queue_priority=100,
+                            available_at=now,
+                        ),
+                    ]
+                )
 
             job.classification_id = classification.id
             job.status = JobStatus.COMPLETED

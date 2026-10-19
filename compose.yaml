@@ -17,6 +17,12 @@ x-app-environment: &app-environment
   CLASSIFICATION_WORKER_RETRY_DELAY_SECONDS: ${CLASSIFICATION_WORKER_RETRY_DELAY_SECONDS:-5}
   CLASSIFICATION_WORKER_MAX_RETRY_DELAY_SECONDS: ${CLASSIFICATION_WORKER_MAX_RETRY_DELAY_SECONDS:-300}
   CLASSIFICATION_WORKER_POLL_INTERVAL_SECONDS: ${CLASSIFICATION_WORKER_POLL_INTERVAL_SECONDS:-1}
+  PLANTAO_BASE_URL: ${PLANTAO_BASE_URL:-http://plantao:8080}
+  PLANTAO_TIMEOUT_SECONDS: ${PLANTAO_TIMEOUT_SECONDS:-10}
+  ALERT_WORKER_LEASE_SECONDS: ${ALERT_WORKER_LEASE_SECONDS:-30}
+  ALERT_WORKER_RETRY_DELAY_SECONDS: ${ALERT_WORKER_RETRY_DELAY_SECONDS:-5}
+  ALERT_WORKER_MAX_RETRY_DELAY_SECONDS: ${ALERT_WORKER_MAX_RETRY_DELAY_SECONDS:-300}
+  ALERT_WORKER_POLL_INTERVAL_SECONDS: ${ALERT_WORKER_POLL_INTERVAL_SECONDS:-1}
 
 services:
   api:
@@ -46,6 +52,19 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - desafio-kit
+
+  alert-worker:
+    build:
+      context: .
+      target: runtime
+    command: ["python", "-m", "triagem.workers.alert"]
+    environment: *app-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     networks:
       - desafio-kit

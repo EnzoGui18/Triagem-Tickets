@@ -22,6 +22,8 @@ Endpoints disponíveis:
 - `GET /health/live`
 - `GET /health/ready`
 - `POST /tickets`
+- `GET /tickets/{external_id}`
+- `GET /tickets`
 
 O modelo inicial contém tickets, versões do classificador, histórico de classificações,
 jobs duráveis e tentativas de entrega de alertas. O schema é aplicado pelo serviço
@@ -34,6 +36,12 @@ provedores externos.
 O serviço `classification-worker` reserva jobs no PostgreSQL com `FOR UPDATE SKIP LOCKED`, chama
 o `llm-sim` sob limite global do Redis, valida a saída e persiste o histórico de classificações.
 Leases expirados voltam para retry, permitindo retomada após interrupção do worker.
+
+Classificações urgentes criam, no mesmo commit, um registro inicial de entrega e um job durável.
+O serviço separado `alert-worker` envia o alerta ao plantão e registra cada tentativa. Respostas
+503, timeout e falhas de rede são reagendadas; 422 encerra o job como falha permanente. A entrega
+possui semântica at-least-once, pois o plantão não oferece chave de idempotência para garantir
+exactly-once.
 
 Os componentes da integração com `llm-sim` ficam em `triagem.llm`: cliente HTTPX, prompt
 `classifier-v1`, parser de resposta e schemas Pydantic. O worker compõe esses componentes por
@@ -55,6 +63,12 @@ sem consumir todas as tentativas.
 Cada classificação preserva a versão exata do classificador, os tokens de entrada e saída e os
 custos calculados com `Decimal`. Reclassificações criam novas linhas e mantêm intacto o histórico
 anterior.
+
+`GET /tickets/{external_id}` retorna os dados do ticket, sua classificação mais recente e o job
+ativo de classificação, quando ainda houver processamento pendente. `GET /tickets` aceita
+`categoria`, `prioridade`, `inicio`, `fim`, `page` e `page_size`. O período filtra `received_at`,
+com limites inclusivos e timestamps obrigatoriamente acompanhados de fuso horário. Filtros e
+paginação são executados no PostgreSQL.
 
 ## Desenvolvimento local
 

@@ -7,7 +7,8 @@ O processo da API não exige disponibilidade de serviços externos para iniciar.
 Os containers compartilham a rede Docker externa `desafio-kit`. Uma execução isolada de migração termina antes do início da API.
 
 O cliente do LLM, o prompt, o parser e o rate limiter são compostos pelo worker de classificação.
-Eles não são invocados pela API. Entrega de alertas ainda não faz parte da aplicação.
+Eles não são invocados pela API. A entrega de alertas urgentes é executada por um worker separado
+e também não participa do processo da API nem do readiness.
 
 ## Integração isolada com o LLM
 
@@ -106,3 +107,38 @@ somente após o commit e não chama Redis, LLM ou plantão.
 A inserção usa `ON CONFLICT` sobre `uq_tickets_external_id`. Apenas a transação vencedora cria
 o job; retries leem o registro já confirmado e comparam o hash. Hash diferente resulta em HTTP
 409.
+
+## Consultas de tickets
+
+`GET /tickets/{external_id}` consulta o ticket pela identidade externa e retorna a classificação
+mais recente, ordenada deterministicamente por `created_at` e `id`. Quando existe um job de
+classificação em `pending`, `processing` ou `retry_scheduled`, seu estado também acompanha a
+resposta. Jobs concluídos ou falhos não são apresentados como processamento pendente.
+
+`GET /tickets` usa uma subconsulta com função de janela para associar cada ticket somente à sua
+classificação atual. Categoria e prioridade filtram essa classificação; o período filtra
+`tickets.received_at`. Predicados, contagem, ordenação, `OFFSET` e `LIMIT` são executados pelo
+PostgreSQL. Tickets sem classificação aparecem na listagem sem esses filtros e são naturalmente
+excluídos quando categoria ou prioridade é informada.
+
+## Alertas urgentes
+
+Quando o resultado validado possui prioridade `urgente`, o `classification-worker` persiste a
+classificação, a primeira tentativa `pending` e um job `alert_delivery` na mesma transação. O
+payload usa somente `external_id`, categoria, prioridade fixa `urgente`, um resumo determinístico
+de assunto e mensagem limitado a 280 caracteres e o instante de persistência da classificação.
+Não existe uma segunda chamada ao LLM.
+
+O `alert-worker` reserva somente jobs de alerta com `FOR UPDATE SKIP LOCKED`, confirma a reserva
+antes do HTTP e usa lease e fencing token da mesma forma que o worker de classificação. HTTP 202
+conclui o job; 503, timeout, falha de rede e outros 5xx geram uma nova tentativa agendada; 422 e
+outros 4xx são permanentes. Falhas do plantão nunca alteram nem recriam a classificação.
+
+Cada tentativa ocupa uma linha numerada em `alert_deliveries`. O contador global e o último erro
+ficam também no `processing_job`; status HTTP, erro, id retornado pelo plantão, início da tentativa,
+próximo retry e entrega ficam na linha da tentativa. O primeiro e o último horário são obtidos de
+`MIN/MAX(attempted_at)`, preservando todo o histórico em vez de sobrescrevê-lo.
+
+A integração oferece semântica **at-least-once**. Se o plantão aceitar o alerta e o worker falhar
+antes do commit local, a recuperação do lease repetirá a entrega. O contrato do plantão não fornece
+chave de idempotência, portanto a aplicação não promete exactly-once.
