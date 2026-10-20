@@ -10,8 +10,10 @@ from triagem.models import (
     AlertDelivery,
     AlertDeliveryStatus,
     Classification,
+    ClassificationAttempt,
     ClassificationCategory,
     ClassifierVersion,
+    JobStatus,
     JobType,
     ProcessingJob,
     Sentiment,
@@ -144,12 +146,31 @@ async def test_persists_multiple_classifications_jobs_and_alert_attempts(
     db_session.add_all([first, second])
     await db_session.flush()
 
+    classification_job = ProcessingJob(
+        ticket_id=ticket.id,
+        job_type=JobType.CLASSIFICATION,
+        queue_priority=50,
+    )
+    db_session.add(classification_job)
+    await db_session.flush()
+
     db_session.add_all(
         [
-            ProcessingJob(
-                ticket_id=ticket.id,
-                job_type=JobType.CLASSIFICATION,
-                queue_priority=50,
+            ClassificationAttempt(
+                processing_job_id=classification_job.id,
+                attempt_number=1,
+                status=JobStatus.RETRY_SCHEDULED,
+                started_at=datetime.now(UTC),
+                finished_at=datetime.now(UTC),
+                error_code="llm_http_503",
+            ),
+            ClassificationAttempt(
+                processing_job_id=classification_job.id,
+                attempt_number=2,
+                status=JobStatus.COMPLETED,
+                started_at=datetime.now(UTC),
+                finished_at=datetime.now(UTC),
+                provider_request_id="provider-request-1",
             ),
             ProcessingJob(
                 ticket_id=ticket.id,
@@ -183,8 +204,14 @@ async def test_persists_multiple_classifications_jobs_and_alert_attempts(
     alert_attempt_count = await db_session.scalar(
         select(func.count(AlertDelivery.id)).where(AlertDelivery.classification_id == first.id)
     )
+    classification_attempt_count = await db_session.scalar(
+        select(func.count(ClassificationAttempt.id)).where(
+            ClassificationAttempt.processing_job_id == classification_job.id
+        )
+    )
 
     assert classification_count == 2
+    assert classification_attempt_count == 2
     assert alert_attempt_count == 2
     assert first.provider_model == "triagem-sim-1"
     assert first.raw_output == '{"categoria":"entrega"}'

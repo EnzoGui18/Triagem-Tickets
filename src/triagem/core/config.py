@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     app_name: str = "Triagem de Tickets"
     app_env: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
+    metrics_port: PositiveInt = 8000
     database_url: str = "postgresql+asyncpg://triagem:triagem@localhost:5432/triagem"
     redis_url: str = "redis://localhost:6379/0"
     llm_base_url: str = "http://llm-sim:8080"

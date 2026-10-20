@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from triagem.core.database import get_session
+from triagem.core.metrics import TICKETS_DUPLICATE, TICKETS_RECEIVED
+from triagem.core.structured_logging import log_event
 from triagem.schemas import (
     TicketAcceptedResponse,
     TicketClassificationResponse,
@@ -16,11 +19,14 @@ from triagem.schemas import (
     TicketListResponse,
     TicketPayload,
     TicketProcessingResponse,
+    TicketTimelineResponse,
 )
 from triagem.ticket_ingestion import TicketPayloadConflictError, ingest_ticket
 from triagem.ticket_queries import TicketQueryRecord, get_ticket_by_external_id, list_tickets
+from triagem.ticket_timeline import get_ticket_timeline
 
 router = APIRouter(prefix="/tickets", tags=["tickets"])
+logger = logging.getLogger(__name__)
 
 
 def _classification_response(
@@ -59,12 +65,34 @@ async def create_ticket(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> TicketAcceptedResponse:
     try:
-        ticket = await ingest_ticket(session, payload)
+        ingestion = await ingest_ticket(session, payload)
     except TicketPayloadConflictError as error:
+        log_event(
+            logger,
+            logging.WARNING,
+            "ticket_conflict",
+            external_id=payload.external_id,
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="external_id já está associado a um payload diferente",
         ) from error
+
+    ticket = ingestion.ticket
+    if ingestion.duplicate:
+        TICKETS_DUPLICATE.inc()
+        event = "ticket_duplicate"
+    else:
+        TICKETS_RECEIVED.inc()
+        event = "ticket_received"
+    log_event(
+        logger,
+        logging.INFO,
+        event,
+        external_id=ticket.external_id,
+        ticket_id=ticket.id,
+        job_id=ingestion.job_id,
+    )
 
     return TicketAcceptedResponse(
         id=ticket.id,
@@ -135,3 +163,18 @@ async def get_ticket(
         current_classification=_classification_response(record),
         processing=processing,
     )
+
+
+@router.get(
+    "/{external_id}/timeline",
+    response_model=TicketTimelineResponse,
+    response_model_exclude_none=True,
+)
+async def get_timeline(
+    external_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> TicketTimelineResponse:
+    timeline = await get_ticket_timeline(session, external_id)
+    if timeline is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ticket não encontrado")
+    return timeline

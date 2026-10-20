@@ -152,3 +152,30 @@ A revisão inicial do Alembic é deliberadamente vazia: ela estabelece o baselin
   não é prometido.
 - Falhas e retries de alerta operam apenas no job `alert_delivery`; nunca criam nova classificação
   nem retornam o job de classificação para processamento.
+
+## Auditoria operacional e timeline
+
+- A timeline não usa uma tabela genérica `audit_events`: recebimento, fila, classificações e
+  alertas já possuem fontes de verdade próprias e são projetados na leitura.
+- `processing_jobs` sobrescreve o último erro quando uma classificação finalmente conclui. Como
+  isso impedia reconstruir retries anteriores, foi criada a tabela específica
+  `classification_attempts`, com uma linha numerada para cada reserva do job.
+- A reserva do job e a criação da tentativa pertencem à mesma transação. Conclusão, falha,
+  expiração de lease e próximo retry atualizam a tentativa sob o mesmo fencing usado pelo worker.
+- Erros persistidos e expostos são códigos e mensagens internas sanitizadas; respostas brutas do
+  provedor e PII do ticket não fazem parte da timeline.
+
+## Observabilidade e segurança
+
+- Logs usam JSON de uma linha com nome de evento e IDs de correlação. O middleware aceita somente
+  `X-Request-ID` de até 128 caracteres no conjunto seguro; qualquer outro valor vira UUID.
+- Campos sensíveis são excluídos por construção e por filtro defensivo no formatter. Não são
+  registrados Authorization, API keys, e-mail, mensagem completa, saída bruta ou system prompt.
+- Métricas usam Prometheus sem labels de alta cardinalidade. A API e cada worker possuem registry
+  por processo e devem ser coletados separadamente; métricas não são mecanismo de durabilidade.
+- A soma `llm_cost_usd_total` é somente telemetria em ponto flutuante exigida pelo formato
+  Prometheus. Cálculo, persistência e relatórios financeiros usam exclusivamente `Decimal` e
+  `NUMERIC(20, 8)` no PostgreSQL.
+- A mensagem é limitada a 12.000 caracteres na validação de entrada para manter folga sob o limite
+  aproximado de contexto do provedor. O sistema não tenta sanitizar ou interpretar HTML, JSON ou
+  instruções no texto; preserva o conteúdo como dado não confiável no campo `input`.

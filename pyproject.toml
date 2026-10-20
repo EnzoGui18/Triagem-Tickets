@@ -15,6 +15,7 @@ dependencies = [
     "fastapi>=0.115,<1",
     "httpx>=0.28,<1",
     "pydantic-settings>=2.6,<3",
+    "prometheus-client>=0.21,<1",
     "redis>=5.2,<7",
     "sqlalchemy[asyncio]>=2.0.36,<3",
     "uvicorn[standard]>=0.32,<1",

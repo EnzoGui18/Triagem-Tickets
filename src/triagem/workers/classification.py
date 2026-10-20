@@ -9,6 +9,7 @@ import socket
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from email.utils import parsedate_to_datetime
 from uuid import UUID, uuid4
 
@@ -22,7 +23,17 @@ from triagem.classification_costs import calculate_classification_costs
 from triagem.classifiers import ClassificationResult, Classifier, LLMClassifier
 from triagem.core.config import get_settings
 from triagem.core.database import async_session_factory, engine
+from triagem.core.metrics import (
+    CLASSIFICATION_COMPLETED,
+    CLASSIFICATION_FAILED,
+    CLASSIFICATION_QUEUE_DEPTH,
+    CLASSIFICATION_RETRY,
+    LLM_COST_USD,
+    LLM_ERRORS,
+    start_worker_metrics_server,
+)
 from triagem.core.redis import redis_client
+from triagem.core.structured_logging import configure_structured_logging, log_event
 from triagem.llm.circuit_breaker import (
     CircuitBreakerError,
     CircuitOpenError,
@@ -46,6 +57,7 @@ from triagem.models import (
     AlertDelivery,
     AlertDeliveryStatus,
     Classification,
+    ClassificationAttempt,
     ClassifierVersion,
     JobStatus,
     JobType,
@@ -64,6 +76,8 @@ class ReservedJob:
     ticket_id: UUID
     locked_at: datetime
     attempt_count: int
+    classification_attempt_id: UUID
+    attempt_number: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +86,20 @@ class FailurePolicy:
     error_code: str
     retry_after_seconds: float | None = None
     consume_attempt: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedClassificationFailure:
+    status: JobStatus
+    error_code: str
+    next_retry_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedClassification:
+    classification_id: UUID
+    alert_id: UUID | None
+    total_cost: Decimal
 
 
 class ClassifierVersionConflictError(Exception):
@@ -194,6 +222,14 @@ class ClassificationWorker:
 
             await self._recover_expired_leases(session, now)
 
+            queue_depth = await session.scalar(
+                select(func.count(ProcessingJob.id)).where(
+                    ProcessingJob.job_type == JobType.CLASSIFICATION,
+                    ProcessingJob.status.in_([JobStatus.PENDING, JobStatus.RETRY_SCHEDULED]),
+                )
+            )
+            CLASSIFICATION_QUEUE_DEPTH.set(queue_depth or 0)
+
             job = await session.scalar(
                 select(ProcessingJob)
                 .where(
@@ -221,6 +257,21 @@ class ClassificationWorker:
             job.last_error_code = None
             job.last_error_message = None
             job.updated_at = now
+            attempt_number = int(
+                await session.scalar(
+                    select(func.coalesce(func.max(ClassificationAttempt.attempt_number), 0) + 1)
+                    .where(ClassificationAttempt.processing_job_id == job.id)
+                )
+                or 1
+            )
+            attempt = ClassificationAttempt(
+                processing_job_id=job.id,
+                attempt_number=attempt_number,
+                status=JobStatus.PROCESSING,
+                started_at=now,
+            )
+            session.add(attempt)
+            await session.flush()
             await session.execute(
                 update(Ticket)
                 .where(Ticket.id == job.ticket_id)
@@ -232,12 +283,24 @@ class ClassificationWorker:
                 ticket_id=job.ticket_id,
                 locked_at=now,
                 attempt_count=job.attempt_count,
+                classification_attempt_id=attempt.id,
+                attempt_number=attempt_number,
             )
 
     async def run_once(self) -> bool:
         reserved_job = await self.reserve_next_job()
         if reserved_job is None:
             return False
+
+        log_event(
+            logger,
+            logging.INFO,
+            "classification_started",
+            job_id=reserved_job.id,
+            ticket_id=reserved_job.ticket_id,
+            attempt_number=reserved_job.attempt_number,
+            worker_id=self.worker_id,
+        )
 
         try:
             classifier_version_id = await self._resolve_classifier_version_id()
@@ -246,32 +309,68 @@ class ClassificationWorker:
         except Exception as error:
             recorded = await self._record_failure(reserved_job, error)
             if recorded:
-                logger.warning(
-                    "classification_job_failed job_id=%s worker_id=%s error_type=%s",
-                    reserved_job.id,
-                    self.worker_id,
-                    type(error).__name__,
+                if isinstance(error, LLMOutputError):
+                    LLM_ERRORS.inc()
+                if recorded.status == JobStatus.RETRY_SCHEDULED:
+                    CLASSIFICATION_RETRY.inc()
+                    event = "classification_retry"
+                else:
+                    CLASSIFICATION_FAILED.inc()
+                    event = "classification_failed"
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    event,
+                    job_id=reserved_job.id,
+                    ticket_id=reserved_job.ticket_id,
+                    attempt_number=reserved_job.attempt_number,
+                    worker_id=self.worker_id,
+                    error_code=recorded.error_code,
+                    next_retry_at=recorded.next_retry_at,
                 )
             return True
 
-        classification_id = await self._complete_job(
+        completed = await self._complete_job(
             reserved_job,
             result,
             classifier_version_id,
         )
-        if classification_id is None:
-            logger.info(
-                "classification_job_lease_lost job_id=%s worker_id=%s",
-                reserved_job.id,
-                self.worker_id,
+        if completed is None:
+            log_event(
+                logger,
+                logging.INFO,
+                "classification_lease_lost",
+                job_id=reserved_job.id,
+                ticket_id=reserved_job.ticket_id,
+                attempt_number=reserved_job.attempt_number,
+                worker_id=self.worker_id,
             )
         else:
-            logger.info(
-                "classification_job_completed job_id=%s classification_id=%s worker_id=%s",
-                reserved_job.id,
-                classification_id,
-                self.worker_id,
+            CLASSIFICATION_COMPLETED.inc()
+            # Prometheus samples are floating point by protocol; the persisted Decimal remains
+            # the source of truth for financial reporting.
+            LLM_COST_USD.inc(float(completed.total_cost))
+            log_event(
+                logger,
+                logging.INFO,
+                "classification_completed",
+                job_id=reserved_job.id,
+                ticket_id=reserved_job.ticket_id,
+                classification_id=completed.classification_id,
+                provider_request_id=result.provider_request_id,
+                worker_id=self.worker_id,
             )
+            if completed.alert_id is not None:
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "alert_created",
+                    job_id=reserved_job.id,
+                    ticket_id=reserved_job.ticket_id,
+                    classification_id=completed.classification_id,
+                    alert_id=completed.alert_id,
+                    worker_id=self.worker_id,
+                )
         return True
 
     async def run_until_idle(self) -> int:
@@ -295,41 +394,52 @@ class ClassificationWorker:
             ),
         )
 
-        exhausted_result = await session.execute(
-            update(ProcessingJob)
-            .where(lease_expired, ProcessingJob.attempt_count >= ProcessingJob.max_attempts)
-            .values(
-                status=JobStatus.FAILED,
-                locked_at=None,
-                locked_by=None,
-                last_error_code="lease_exhausted",
-                last_error_message="worker lease expired after the final attempt",
-                completed_at=now,
-                updated_at=now,
-            )
-            .returning(ProcessingJob.ticket_id)
+        expired_jobs = list(
+            (
+                await session.scalars(
+                    select(ProcessingJob).where(lease_expired).with_for_update(skip_locked=True)
+                )
+            ).all()
         )
-        exhausted_ticket_ids = list(exhausted_result.scalars())
-        if exhausted_ticket_ids:
-            await session.execute(
-                update(Ticket)
-                .where(Ticket.id.in_(exhausted_ticket_ids))
-                .values(status=TicketStatus.FAILED, updated_at=now)
+        for job in expired_jobs:
+            exhausted = job.attempt_count >= job.max_attempts
+            error_code = "lease_exhausted" if exhausted else "lease_expired"
+            error_message = (
+                "worker lease expired after the final attempt"
+                if exhausted
+                else "worker lease expired before completion"
             )
+            attempt = await session.scalar(
+                select(ClassificationAttempt)
+                .where(
+                    ClassificationAttempt.processing_job_id == job.id,
+                    ClassificationAttempt.status == JobStatus.PROCESSING,
+                )
+                .order_by(ClassificationAttempt.attempt_number.desc())
+                .limit(1)
+                .with_for_update()
+            )
+            if attempt is not None:
+                attempt.status = JobStatus.FAILED if exhausted else JobStatus.RETRY_SCHEDULED
+                attempt.finished_at = now
+                attempt.next_retry_at = None if exhausted else now
+                attempt.error_code = error_code
+                attempt.error_message = error_message
 
-        await session.execute(
-            update(ProcessingJob)
-            .where(lease_expired, ProcessingJob.attempt_count < ProcessingJob.max_attempts)
-            .values(
-                status=JobStatus.RETRY_SCHEDULED,
-                available_at=now,
-                locked_at=None,
-                locked_by=None,
-                last_error_code="lease_expired",
-                last_error_message="worker lease expired before completion",
-                updated_at=now,
-            )
-        )
+            job.status = JobStatus.FAILED if exhausted else JobStatus.RETRY_SCHEDULED
+            job.available_at = now
+            job.locked_at = None
+            job.locked_by = None
+            job.last_error_code = error_code
+            job.last_error_message = error_message
+            job.completed_at = now if exhausted else None
+            job.updated_at = now
+            if exhausted:
+                await session.execute(
+                    update(Ticket)
+                    .where(Ticket.id == job.ticket_id)
+                    .values(status=TicketStatus.FAILED, updated_at=now)
+                )
 
     async def _load_ticket(self, ticket_id: UUID) -> Ticket:
         async with self._session_factory() as session:
@@ -343,7 +453,7 @@ class ClassificationWorker:
         reserved_job: ReservedJob,
         result: ClassificationResult,
         classifier_version_id: UUID,
-    ) -> UUID | None:
+    ) -> CompletedClassification | None:
         async with self._session_factory() as session, session.begin():
             job = await self._owned_job(session, reserved_job)
             if job is None:
@@ -377,6 +487,21 @@ class ClassificationWorker:
             session.add(classification)
             await session.flush()
 
+            attempt = await session.get(
+                ClassificationAttempt,
+                reserved_job.classification_attempt_id,
+                with_for_update=True,
+            )
+            if attempt is None:  # pragma: no cover - created atomically with the reservation
+                raise RuntimeError("classification attempt was not found")
+            attempt.status = JobStatus.COMPLETED
+            attempt.finished_at = now
+            attempt.next_retry_at = None
+            attempt.error_code = None
+            attempt.error_message = None
+            attempt.provider_request_id = result.provider_request_id
+
+            alert_delivery: AlertDelivery | None = None
             if result.priority == TicketPriority.URGENT:
                 ticket = await session.get(Ticket, job.ticket_id)
                 if ticket is None:  # pragma: no cover - protected by the job foreign key
@@ -386,14 +511,15 @@ class ClassificationWorker:
                     category=result.category,
                     detected_at=now,
                 )
+                alert_delivery = AlertDelivery(
+                    classification_id=classification.id,
+                    attempt_number=1,
+                    status=AlertDeliveryStatus.PENDING,
+                    request_payload=alert_payload.model_dump(mode="json", by_alias=True),
+                )
                 session.add_all(
                     [
-                        AlertDelivery(
-                            classification_id=classification.id,
-                            attempt_number=1,
-                            status=AlertDeliveryStatus.PENDING,
-                            request_payload=alert_payload.model_dump(mode="json", by_alias=True),
-                        ),
+                        alert_delivery,
                         ProcessingJob(
                             ticket_id=job.ticket_id,
                             classification_id=classification.id,
@@ -403,6 +529,7 @@ class ClassificationWorker:
                         ),
                     ]
                 )
+                await session.flush()
 
             job.classification_id = classification.id
             job.status = JobStatus.COMPLETED
@@ -415,13 +542,21 @@ class ClassificationWorker:
                 .where(Ticket.id == job.ticket_id)
                 .values(status=TicketStatus.CLASSIFIED, updated_at=now)
             )
-            return classification.id
+            return CompletedClassification(
+                classification_id=classification.id,
+                alert_id=alert_delivery.id if alert_delivery is not None else None,
+                total_cost=costs.total_cost,
+            )
 
-    async def _record_failure(self, reserved_job: ReservedJob, error: Exception) -> bool:
+    async def _record_failure(
+        self,
+        reserved_job: ReservedJob,
+        error: Exception,
+    ) -> RecordedClassificationFailure | None:
         async with self._session_factory() as session, session.begin():
             job = await self._owned_job(session, reserved_job)
             if job is None:
-                return False
+                return None
 
             now = await session.scalar(select(func.clock_timestamp()))
             if now is None:  # pragma: no cover - PostgreSQL always returns a value
@@ -453,7 +588,28 @@ class ClassificationWorker:
                     .where(Ticket.id == job.ticket_id)
                     .values(status=TicketStatus.FAILED, updated_at=now)
                 )
-            return True
+
+            attempt = await session.get(
+                ClassificationAttempt,
+                reserved_job.classification_attempt_id,
+                with_for_update=True,
+            )
+            if attempt is None:  # pragma: no cover - created atomically with the reservation
+                raise RuntimeError("classification attempt was not found")
+            attempt.status = job.status
+            attempt.finished_at = now
+            attempt.next_retry_at = (
+                job.available_at if job.status == JobStatus.RETRY_SCHEDULED else None
+            )
+            attempt.error_code = policy.error_code
+            attempt.error_message = job.last_error_message
+            return RecordedClassificationFailure(
+                status=job.status,
+                error_code=policy.error_code,
+                next_retry_at=(
+                    job.available_at if job.status == JobStatus.RETRY_SCHEDULED else None
+                ),
+            )
 
     def _retry_delay_for(
         self,
@@ -539,6 +695,8 @@ def _worker_id() -> str:
 
 async def _run_worker() -> None:
     settings = get_settings()
+    configure_structured_logging(settings.log_level)
+    start_worker_metrics_server(settings.metrics_port)
     try:
         async with httpx.AsyncClient() as http_client:
             rate_limiter = RedisSlidingWindowRateLimiter(
@@ -580,7 +738,6 @@ async def _run_worker() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=get_settings().log_level)
     asyncio.run(_run_worker())
 
 

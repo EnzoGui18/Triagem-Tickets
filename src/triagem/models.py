@@ -313,6 +313,51 @@ class ProcessingJob(TimestampMixin, Base):
 
     ticket: Mapped[Ticket] = relationship(back_populates="processing_jobs")
     classification: Mapped[Classification | None] = relationship(back_populates="processing_jobs")
+    classification_attempts: Mapped[list[ClassificationAttempt]] = relationship(
+        back_populates="processing_job", passive_deletes=True
+    )
+
+
+class ClassificationAttempt(Base):
+    __tablename__ = "classification_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "processing_job_id",
+            "attempt_number",
+            name="uq_classification_attempt_number",
+        ),
+        CheckConstraint("attempt_number > 0", name="ck_classification_attempt_number"),
+        Index(
+            "ix_classification_attempts_job_started_at",
+            "processing_job_id",
+            "started_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    processing_job_id: Mapped[UUID] = mapped_column(
+        ForeignKey("processing_jobs.id", ondelete="RESTRICT"), nullable=False
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[JobStatus] = mapped_column(
+        SqlEnum(JobStatus, name="job_status", values_callable=_enum_values, validate_strings=True),
+        nullable=False,
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    error_message: Mapped[str | None] = mapped_column(String(1000))
+    provider_request_id: Mapped[str | None] = mapped_column(String(255))
+
+    processing_job: Mapped[ProcessingJob] = relationship(
+        back_populates="classification_attempts"
+    )
 
 
 class AlertDelivery(TimestampMixin, Base):

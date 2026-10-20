@@ -21,8 +21,10 @@ Endpoints disponíveis:
 
 - `GET /health/live`
 - `GET /health/ready`
+- `GET /metrics`
 - `POST /tickets`
 - `GET /tickets/{external_id}`
+- `GET /tickets/{external_id}/timeline`
 - `GET /tickets`
 
 O modelo inicial contém tickets, versões do classificador, histórico de classificações,
@@ -69,6 +71,25 @@ ativo de classificação, quando ainda houver processamento pendente. `GET /tick
 `categoria`, `prioridade`, `inicio`, `fim`, `page` e `page_size`. O período filtra `received_at`,
 com limites inclusivos e timestamps obrigatoriamente acompanhados de fuso horário. Filtros e
 paginação são executados no PostgreSQL.
+
+`GET /tickets/{external_id}/timeline` deriva uma linha do tempo cronológica do ticket, dos jobs,
+das tentativas de classificação, das classificações e das entregas de alerta. O histórico inclui
+retries e códigos de erro internos sem expor o conteúdo do ticket nem mensagens brutas dos
+provedores.
+
+Logs operacionais são emitidos em JSON e usam `X-Request-ID` como correlação quando o valor é
+seguro; caso contrário, a API gera um UUID e o devolve no response header. Os logs incluem IDs
+operacionais, mas não incluem Authorization, API keys, e-mail, mensagem do cliente, saída bruta ou
+system prompt.
+
+As métricas Prometheus da API estão em `/metrics`. Cada worker também expõe métricas na porta
+configurada por `METRICS_PORT` (8000 por padrão) dentro da rede Docker. Como são processos
+separados, um coletor deve fazer scrape de `api`, `classification-worker` e `alert-worker`.
+
+`mensagem` aceita no máximo 12.000 caracteres. O conteúdo continua sendo tratado como dado não
+confiável: HTML, JSON e instruções no texto são serializados apenas no campo `input` do LLM. O
+prompt ajuda a orientar o modelo, mas não é fronteira de segurança; limites Pydantic, enums e o
+parser permanecem responsáveis pela validação estrutural.
 
 ## Desenvolvimento local
 

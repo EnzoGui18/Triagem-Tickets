@@ -39,6 +39,25 @@ async def real_worker_session_factory(
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     test_engine = create_async_engine(migrated_database_url)
     factory = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session, session.begin():
+        now = await session.scalar(select(func.clock_timestamp()))
+        assert now is not None
+        await session.execute(
+            update(ProcessingJob)
+            .where(
+                ProcessingJob.job_type == JobType.CLASSIFICATION,
+                ProcessingJob.status.in_(
+                    (JobStatus.PENDING, JobStatus.PROCESSING, JobStatus.RETRY_SCHEDULED)
+                ),
+            )
+            .values(
+                status=JobStatus.FAILED,
+                locked_at=None,
+                locked_by=None,
+                completed_at=now,
+                updated_at=now,
+            )
+        )
     try:
         yield factory
     finally:

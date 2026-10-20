@@ -10,6 +10,7 @@ DOMAIN_TABLES = {
     "classifier_versions",
     "classifications",
     "processing_jobs",
+    "classification_attempts",
     "alert_deliveries",
 }
 

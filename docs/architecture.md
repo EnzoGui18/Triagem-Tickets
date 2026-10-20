@@ -84,12 +84,14 @@ job cujo lease já foi assumido por outro processo.
 
 ## Modelo de dados inicial
 
-O PostgreSQL contém cinco entidades principais:
+O PostgreSQL contém seis entidades principais:
 
 - `tickets`: registro durável e idempotente do ticket, protegido por `UNIQUE (external_id)`;
 - `classifier_versions`: versão imutável do modelo, prompt de sistema e schema de saída;
 - `classifications`: histórico de classificações, com relação muitos-para-um com o ticket;
 - `processing_jobs`: fila durável para classificação e entrega de alertas;
+- `classification_attempts`: uma linha por reserva do job de classificação, com início, resultado,
+  erro interno e eventual reagendamento;
 - `alert_deliveries`: uma linha por tentativa de entrega, preservando payload, resultado e erro.
 
 Jobs de alerta podem referenciar a classificação que os originou. Isso separa retry de entrega de uma nova execução da IA. Foreign keys usam `RESTRICT` para impedir a remoção acidental de histórico.
@@ -121,6 +123,13 @@ classificação atual. Categoria e prioridade filtram essa classificação; o pe
 PostgreSQL. Tickets sem classificação aparecem na listagem sem esses filtros e são naturalmente
 excluídos quando categoria ou prioridade é informada.
 
+`GET /tickets/{external_id}/timeline` consulta apenas registros vinculados ao ticket e ordena os
+eventos por timestamp e precedência determinística. Recebimento e entrada na fila vêm de `tickets`
+e `processing_jobs`; execuções e retries do LLM vêm de `classification_attempts`; prioridade e
+conclusão vêm de `classifications`; criação, tentativas, falhas e entrega do alerta vêm de
+`alert_deliveries`. Jobs anteriores à migration continuam legíveis a partir dos campos agregados
+existentes, embora somente tentativas posteriores possuam granularidade completa.
+
 ## Alertas urgentes
 
 Quando o resultado validado possui prioridade `urgente`, o `classification-worker` persiste a
@@ -142,3 +151,22 @@ próximo retry e entrega ficam na linha da tentativa. O primeiro e o último hor
 A integração oferece semântica **at-least-once**. Se o plantão aceitar o alerta e o worker falhar
 antes do commit local, a recuperação do lease repetirá a entrega. O contrato do plantão não fornece
 chave de idempotência, portanto a aplicação não promete exactly-once.
+
+## Observabilidade e segurança de entrada
+
+A API instala um middleware de correlação. Um `X-Request-ID` com formato seguro é preservado; valor
+ausente ou hostil é substituído por UUID. O mesmo ID entra nos eventos JSON emitidos durante a
+requisição. Workers correlacionam eventos por `ticket_id`, `job_id`, `classification_id`, `alert_id`
+e `provider_request_id`, conforme cada etapa dispõe desses valores.
+
+Os eventos estruturados são formados por campos controlados. O formatter também descarta campos
+cujo nome indique Authorization, API key, e-mail, mensagem, saída bruta ou system prompt. A API
+expõe métricas Prometheus em `/metrics`; cada worker inicia um exporter próprio na porta 8000 da
+rede interna. Contadores de custo são telemetria aproximada do protocolo Prometheus; os valores
+financeiros autoritativos continuam como `NUMERIC` calculado com `Decimal` no PostgreSQL.
+
+O contrato limita `mensagem` a 12.000 caracteres antes da persistência e da fila. Assunto e mensagem
+são serializados como JSON no campo `input`; nunca são concatenados ao `system`. Conteúdo Unicode,
+HTML, JSON ou instruções adversariais permanece dado, mas o prompt não é tratado como barreira de
+segurança. Enums Pydantic, parser estrito, limites de tamanho, retries limitados e isolamento dos
+efeitos urgentes continuam sendo as fronteiras aplicadas pelo sistema.

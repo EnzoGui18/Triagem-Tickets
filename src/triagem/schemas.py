@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
 from typing import Annotated
 from uuid import UUID
 
@@ -30,6 +31,7 @@ CustomerName = Annotated[
 ]
 Subject = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
 Channel = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=50)]
+MAX_TICKET_MESSAGE_LENGTH = 12_000
 
 
 class CustomerPayload(BaseModel):
@@ -46,7 +48,11 @@ class TicketPayload(BaseModel):
     external_id: ExternalId
     customer: CustomerPayload = Field(alias="cliente")
     subject: Subject = Field(alias="assunto")
-    message: str = Field(alias="mensagem", min_length=1)
+    message: str = Field(
+        alias="mensagem",
+        min_length=1,
+        max_length=MAX_TICKET_MESSAGE_LENGTH,
+    )
     channel: Channel = Field(alias="canal")
     source_created_at: datetime = Field(alias="criado_em")
 
@@ -157,3 +163,39 @@ class TicketListResponse(BaseModel):
     page: int
     page_size: int
     total_pages: int
+
+
+class TicketTimelineEventType(StrEnum):
+    TICKET_RECEIVED = "ticket_received"
+    CLASSIFICATION_QUEUED = "classification_queued"
+    CLASSIFICATION_STARTED = "classification_started"
+    CLASSIFICATION_RETRY = "classification_retry"
+    CLASSIFICATION_COMPLETED = "classification_completed"
+    CLASSIFICATION_FAILED = "classification_failed"
+    ALERT_CREATED = "alert_created"
+    ALERT_ATTEMPT = "alert_attempt"
+    ALERT_RETRY = "alert_retry"
+    ALERT_DELIVERED = "alert_delivered"
+    ALERT_FAILED = "alert_failed"
+
+
+class TicketTimelineEventResponse(BaseModel):
+    event_type: TicketTimelineEventType = Field(serialization_alias="tipo")
+    occurred_at: datetime = Field(serialization_alias="ocorrido_em")
+    job_id: UUID | None = None
+    classification_id: UUID | None = None
+    alert_id: UUID | None = None
+    attempt_number: int | None = Field(default=None, serialization_alias="tentativa")
+    status: str | None = None
+    category: ClassificationCategory | None = Field(default=None, serialization_alias="categoria")
+    priority: TicketPriority | None = Field(default=None, serialization_alias="prioridade")
+    error_code: str | None = Field(default=None, serialization_alias="codigo_erro")
+    error_message: str | None = Field(default=None, serialization_alias="erro")
+    http_status_code: int | None = Field(default=None, serialization_alias="http_status")
+    next_retry_at: datetime | None = Field(default=None, serialization_alias="proxima_tentativa_em")
+    provider_request_id: str | None = None
+
+
+class TicketTimelineResponse(BaseModel):
+    external_id: str
+    events: list[TicketTimelineEventResponse] = Field(serialization_alias="eventos")

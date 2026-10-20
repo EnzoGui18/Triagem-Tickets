@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import UTC
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
@@ -14,6 +16,13 @@ from triagem.schemas import TicketPayload
 
 class TicketPayloadConflictError(Exception):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionResult:
+    ticket: Ticket
+    job_id: UUID
+    duplicate: bool
 
 
 def calculate_payload_hash(payload: TicketPayload) -> str:
@@ -28,7 +37,7 @@ def calculate_payload_hash(payload: TicketPayload) -> str:
     return hashlib.sha256(encoded_payload).hexdigest()
 
 
-async def ingest_ticket(session: AsyncSession, payload: TicketPayload) -> Ticket:
+async def ingest_ticket(session: AsyncSession, payload: TicketPayload) -> IngestionResult:
     payload_hash = calculate_payload_hash(payload)
     ticket_values = {
         "external_id": payload.external_id,
@@ -59,14 +68,25 @@ async def ingest_ticket(session: AsyncSession, payload: TicketPayload) -> Ticket
                 raise RuntimeError("conflicting ticket was not found")
             if ticket.payload_hash != payload_hash:
                 raise TicketPayloadConflictError
-            return ticket
-
-        session.add(
-            ProcessingJob(
-                ticket_id=ticket.id,
-                job_type=JobType.CLASSIFICATION,
-                queue_priority=0,
+            existing_job_id = await session.scalar(
+                select(ProcessingJob.id)
+                .where(
+                    ProcessingJob.ticket_id == ticket.id,
+                    ProcessingJob.job_type == JobType.CLASSIFICATION,
+                )
+                .order_by(ProcessingJob.created_at, ProcessingJob.id)
+                .limit(1)
             )
-        )
+            if existing_job_id is None:
+                raise RuntimeError("accepted ticket has no classification job")
+            return IngestionResult(ticket=ticket, job_id=existing_job_id, duplicate=True)
 
-    return ticket
+        job = ProcessingJob(
+            ticket_id=ticket.id,
+            job_type=JobType.CLASSIFICATION,
+            queue_priority=0,
+        )
+        session.add(job)
+        await session.flush()
+
+    return IngestionResult(ticket=ticket, job_id=job.id, duplicate=False)

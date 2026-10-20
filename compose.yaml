@@ -3,6 +3,7 @@ name: triagem-tickets
 x-app-environment: &app-environment
   APP_ENV: ${APP_ENV:-development}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  METRICS_PORT: ${METRICS_PORT:-8000}
   DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-triagem}:${POSTGRES_PASSWORD:-triagem}@postgres:5432/${POSTGRES_DB:-triagem}
   REDIS_URL: redis://redis:6379/0
   LLM_BASE_URL: ${LLM_BASE_URL:-http://llm-sim:8080}

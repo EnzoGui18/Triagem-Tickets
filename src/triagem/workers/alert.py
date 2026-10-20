@@ -26,6 +26,8 @@ from triagem.alerting import (
 )
 from triagem.core.config import get_settings
 from triagem.core.database import async_session_factory, engine
+from triagem.core.metrics import ALERTS_DELIVERED, ALERTS_RETRY, start_worker_metrics_server
+from triagem.core.structured_logging import configure_structured_logging, log_event
 from triagem.models import (
     AlertDelivery,
     AlertDeliveryStatus,
@@ -52,6 +54,13 @@ class AlertFailurePolicy:
     retryable: bool
     error_code: str
     http_status_code: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedAlertFailure:
+    status: JobStatus
+    error_code: str
+    next_retry_at: datetime | None
 
 
 def _failure_policy(error: Exception) -> AlertFailurePolicy:
@@ -158,38 +167,70 @@ class AlertWorker:
         if reserved_job is None:
             return False
 
+        log_event(
+            logger,
+            logging.INFO,
+            "alert_attempt",
+            job_id=reserved_job.id,
+            ticket_id=reserved_job.ticket_id,
+            classification_id=reserved_job.classification_id,
+            alert_id=reserved_job.alert_delivery_id,
+            attempt_number=reserved_job.attempt_count,
+            worker_id=self.worker_id,
+        )
+
         try:
             payload = AlertPayload.model_validate(reserved_job.request_payload)
             result = await self._sender.deliver(payload)
         except Exception as error:
             recorded = await self._record_failure(reserved_job, error)
             if recorded:
-                logger.warning(
-                    "alert_job_failed job_id=%s classification_id=%s alert_id=%s "
-                    "worker_id=%s error_type=%s",
-                    reserved_job.id,
-                    reserved_job.classification_id,
-                    reserved_job.alert_delivery_id,
-                    self.worker_id,
-                    type(error).__name__,
+                if recorded.status == JobStatus.RETRY_SCHEDULED:
+                    ALERTS_RETRY.inc()
+                    event = "alert_retry"
+                else:
+                    event = "alert_failed"
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    event,
+                    job_id=reserved_job.id,
+                    ticket_id=reserved_job.ticket_id,
+                    classification_id=reserved_job.classification_id,
+                    alert_id=reserved_job.alert_delivery_id,
+                    attempt_number=reserved_job.attempt_count,
+                    worker_id=self.worker_id,
+                    error_code=recorded.error_code,
+                    next_retry_at=recorded.next_retry_at,
                 )
             return True
 
         completed = await self._complete_job(reserved_job, result)
         if completed:
-            logger.info(
-                "alert_job_completed job_id=%s classification_id=%s alert_id=%s worker_id=%s",
-                reserved_job.id,
-                reserved_job.classification_id,
-                reserved_job.alert_delivery_id,
-                self.worker_id,
+            ALERTS_DELIVERED.inc()
+            log_event(
+                logger,
+                logging.INFO,
+                "alert_delivered",
+                job_id=reserved_job.id,
+                ticket_id=reserved_job.ticket_id,
+                classification_id=reserved_job.classification_id,
+                alert_id=reserved_job.alert_delivery_id,
+                attempt_number=reserved_job.attempt_count,
+                provider_request_id=result.provider_alert_id,
+                worker_id=self.worker_id,
             )
         else:
-            logger.info(
-                "alert_job_lease_lost job_id=%s alert_id=%s worker_id=%s",
-                reserved_job.id,
-                reserved_job.alert_delivery_id,
-                self.worker_id,
+            log_event(
+                logger,
+                logging.INFO,
+                "alert_lease_lost",
+                job_id=reserved_job.id,
+                ticket_id=reserved_job.ticket_id,
+                classification_id=reserved_job.classification_id,
+                alert_id=reserved_job.alert_delivery_id,
+                attempt_number=reserved_job.attempt_count,
+                worker_id=self.worker_id,
             )
         return True
 
@@ -286,18 +327,18 @@ class AlertWorker:
         self,
         reserved_job: ReservedAlertJob,
         error: Exception,
-    ) -> bool:
+    ) -> RecordedAlertFailure | None:
         async with self._session_factory() as session, session.begin():
             job = await self._owned_job(session, reserved_job)
             if job is None:
-                return False
+                return None
             delivery = await session.get(
                 AlertDelivery,
                 reserved_job.alert_delivery_id,
                 with_for_update=True,
             )
             if delivery is None:
-                return False
+                return None
 
             now = await self._database_now(session)
             policy = _failure_policy(error)
@@ -330,7 +371,11 @@ class AlertWorker:
                 job.status = JobStatus.FAILED
                 job.completed_at = now
                 delivery.next_retry_at = None
-            return True
+            return RecordedAlertFailure(
+                status=job.status,
+                error_code=policy.error_code,
+                next_retry_at=delivery.next_retry_at,
+            )
 
     async def _recover_expired_leases(self, session: AsyncSession, now: datetime) -> None:
         expired_jobs = list(
@@ -428,6 +473,8 @@ def _worker_id() -> str:
 
 async def _run_worker() -> None:
     settings = get_settings()
+    configure_structured_logging(settings.log_level)
+    start_worker_metrics_server(settings.metrics_port)
     try:
         async with httpx.AsyncClient() as http_client:
             worker = AlertWorker(
@@ -451,7 +498,6 @@ async def _run_worker() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=get_settings().log_level)
     asyncio.run(_run_worker())
 
 

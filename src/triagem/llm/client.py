@@ -7,6 +7,13 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
+from triagem.core.metrics import (
+    LLM_ERRORS,
+    LLM_INPUT_TOKENS,
+    LLM_OUTPUT_TOKENS,
+    LLM_RATE_LIMITED,
+    LLM_REQUESTS,
+)
 from triagem.llm.circuit_breaker import (
     CircuitBreaker,
     CircuitBreakerError,
@@ -128,6 +135,7 @@ class LLMClient:
             await self._rate_limiter.acquire()
             permit = await self._circuit_breaker.acquire()
             started_at = time.perf_counter()
+            LLM_REQUESTS.inc()
             try:
                 if self._http_client is not None:
                     response = await self._send(self._http_client, request)
@@ -136,17 +144,29 @@ class LLMClient:
                         response = await self._send(client, request)
                 latency_ms = max(0, round((time.perf_counter() - started_at) * 1000))
                 result = self._handle_response(response, latency_ms=latency_ms)
+            except LLMRateLimitError:
+                LLM_RATE_LIMITED.inc()
+                LLM_ERRORS.inc()
+                await self._record_success(permit)
+                raise
             except (LLMTransientProviderError, LLMTransportError) as error:
+                LLM_ERRORS.inc()
                 await self._record_failure(permit)
                 if permit.is_probe:
                     raise CircuitProbeFailureError(
                         retry_after_seconds=self._circuit_breaker.recovery_timeout_seconds
                     ) from error
                 raise
+            except LLMClientError:
+                LLM_ERRORS.inc()
+                await self._record_success(permit)
+                raise
             except Exception:
                 await self._record_success(permit)
                 raise
             await self._record_success(permit)
+            LLM_INPUT_TOKENS.inc(result.usage.input_tokens)
+            LLM_OUTPUT_TOKENS.inc(result.usage.output_tokens)
             return result
 
     async def _record_success(self, permit: CircuitPermit) -> None:
