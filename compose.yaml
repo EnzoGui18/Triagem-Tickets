@@ -5,6 +5,9 @@ x-app-environment: &app-environment
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   METRICS_PORT: ${METRICS_PORT:-8000}
   DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-triagem}:${POSTGRES_PASSWORD:-triagem}@postgres:5432/${POSTGRES_DB:-triagem}
+  DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-5}
+  DATABASE_MAX_OVERFLOW: ${DATABASE_MAX_OVERFLOW:-10}
+  DATABASE_POOL_TIMEOUT_SECONDS: ${DATABASE_POOL_TIMEOUT_SECONDS:-5}
   REDIS_URL: redis://redis:6379/0
   LLM_BASE_URL: ${LLM_BASE_URL:-http://llm-sim:8080}
   LLM_API_KEY: ${LLM_API_KEY:-sk-sim-desafio-elavo}
@@ -14,23 +17,27 @@ x-app-environment: &app-environment
   LLM_MAX_CONCURRENCY: ${LLM_MAX_CONCURRENCY:-5}
   LLM_CIRCUIT_BREAKER_FAILURE_THRESHOLD: ${LLM_CIRCUIT_BREAKER_FAILURE_THRESHOLD:-2}
   LLM_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECONDS: ${LLM_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECONDS:-10}
-  CLASSIFICATION_WORKER_LEASE_SECONDS: ${CLASSIFICATION_WORKER_LEASE_SECONDS:-30}
+  CLASSIFICATION_WORKER_LEASE_SECONDS: ${CLASSIFICATION_WORKER_LEASE_SECONDS:-60}
   CLASSIFICATION_WORKER_RETRY_DELAY_SECONDS: ${CLASSIFICATION_WORKER_RETRY_DELAY_SECONDS:-5}
   CLASSIFICATION_WORKER_MAX_RETRY_DELAY_SECONDS: ${CLASSIFICATION_WORKER_MAX_RETRY_DELAY_SECONDS:-300}
-  CLASSIFICATION_WORKER_POLL_INTERVAL_SECONDS: ${CLASSIFICATION_WORKER_POLL_INTERVAL_SECONDS:-1}
+  CLASSIFICATION_WORKER_POLL_INTERVAL_SECONDS: ${CLASSIFICATION_WORKER_POLL_INTERVAL_SECONDS:-0.5}
   PLANTAO_BASE_URL: ${PLANTAO_BASE_URL:-http://plantao:8080}
   PLANTAO_TIMEOUT_SECONDS: ${PLANTAO_TIMEOUT_SECONDS:-10}
   ALERT_WORKER_LEASE_SECONDS: ${ALERT_WORKER_LEASE_SECONDS:-30}
   ALERT_WORKER_RETRY_DELAY_SECONDS: ${ALERT_WORKER_RETRY_DELAY_SECONDS:-5}
   ALERT_WORKER_MAX_RETRY_DELAY_SECONDS: ${ALERT_WORKER_MAX_RETRY_DELAY_SECONDS:-300}
-  ALERT_WORKER_POLL_INTERVAL_SECONDS: ${ALERT_WORKER_POLL_INTERVAL_SECONDS:-1}
+  ALERT_WORKER_POLL_INTERVAL_SECONDS: ${ALERT_WORKER_POLL_INTERVAL_SECONDS:-0.5}
 
 services:
   api:
     build:
       context: .
       target: runtime
-    environment: *app-environment
+    environment:
+      <<: *app-environment
+      DATABASE_POOL_SIZE: ${API_DATABASE_POOL_SIZE:-5}
+      DATABASE_MAX_OVERFLOW: ${API_DATABASE_MAX_OVERFLOW:-10}
+      DATABASE_POOL_TIMEOUT_SECONDS: ${API_DATABASE_POOL_TIMEOUT_SECONDS:-2}
     ports:
       - "${APP_PORT:-8000}:8000"
     depends_on:
@@ -47,13 +54,18 @@ services:
       context: .
       target: runtime
     command: ["python", "-m", "triagem.workers.classification"]
-    environment: *app-environment
+    environment:
+      <<: *app-environment
+      DATABASE_POOL_SIZE: ${WORKER_DATABASE_POOL_SIZE:-2}
+      DATABASE_MAX_OVERFLOW: ${WORKER_DATABASE_MAX_OVERFLOW:-0}
     depends_on:
       migrate:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
     restart: unless-stopped
+    deploy:
+      replicas: ${CLASSIFICATION_WORKER_REPLICAS:-3}
     networks:
       - desafio-kit
 
@@ -62,7 +74,10 @@ services:
       context: .
       target: runtime
     command: ["python", "-m", "triagem.workers.alert"]
-    environment: *app-environment
+    environment:
+      <<: *app-environment
+      DATABASE_POOL_SIZE: ${WORKER_DATABASE_POOL_SIZE:-2}
+      DATABASE_MAX_OVERFLOW: ${WORKER_DATABASE_MAX_OVERFLOW:-0}
     depends_on:
       migrate:
         condition: service_completed_successfully

@@ -90,6 +90,16 @@ def test_metrics_endpoint_exposes_prioritized_counters(client: TestClient) -> No
         b"llm_cost_usd_total",
         b"alerts_delivered_total",
         b"alerts_retry_total",
+        b"ingestion_duration_seconds",
+        b"classification_queue_wait_seconds",
+        b"llm_request_duration_seconds",
+        b"classification_duration_seconds",
+        b"alert_request_duration_seconds",
+        b"ticket_processing_duration_seconds",
+        b"llm_rate_limit_wait_total",
+        b"database_pool_capacity",
+        b"database_pool_connections",
+        b"database_pool_checked_out",
     ):
         assert metric_name in response.content
     assert generate_latest() != before

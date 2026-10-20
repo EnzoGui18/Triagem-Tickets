@@ -51,6 +51,16 @@ async def _classification_columns(database_url: str) -> set[str]:
     return {str(column["name"]) for column in columns}
 
 
+async def _index_names(database_url: str, table_name: str) -> set[str]:
+    test_engine = create_async_engine(database_url)
+    async with test_engine.connect() as connection:
+        indexes = await connection.run_sync(
+            lambda sync_connection: inspect(sync_connection).get_indexes(table_name)
+        )
+    await test_engine.dispose()
+    return {str(index["name"]) for index in indexes}
+
+
 async def _insert_classification_with_usage(database_url: str) -> str:
     test_engine = create_async_engine(database_url)
     identifier = uuid4()
@@ -115,6 +125,14 @@ async def test_migrations_upgrade_and_downgrade(migrated_database_url: str) -> N
         "output_cost",
         "total_cost",
     } <= await _classification_columns(migrated_database_url)
+    assert "ix_classifications_ticket_latest" in await _index_names(
+        migrated_database_url,
+        "classifications",
+    )
+    assert "ix_processing_jobs_lease_recovery" in await _index_names(
+        migrated_database_url,
+        "processing_jobs",
+    )
 
     try:
         await run_alembic(migrated_database_url, "downgrade", "20261017_0003")

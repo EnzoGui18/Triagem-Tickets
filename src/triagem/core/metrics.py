@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from typing import Protocol
+
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     Counter,
     Gauge,
+    Histogram,
     generate_latest,
     start_http_server,
 )
@@ -48,6 +51,68 @@ LLM_COST_USD = Counter(
 )
 ALERTS_DELIVERED = Counter("alerts_delivered_total", "Urgent alerts accepted by plantao.")
 ALERTS_RETRY = Counter("alerts_retry_total", "Urgent alert deliveries scheduled for retry.")
+INGESTION_DURATION = Histogram(
+    "ingestion_duration_seconds",
+    "End-to-end duration of POST /tickets, including validation and persistence.",
+    buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5),
+)
+CLASSIFICATION_QUEUE_WAIT = Histogram(
+    "classification_queue_wait_seconds",
+    "Time from durable job creation until its first reservation.",
+    buckets=(0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600),
+)
+LLM_REQUEST_DURATION = Histogram(
+    "llm_request_duration_seconds",
+    "Duration of HTTP requests to the LLM provider.",
+    buckets=(0.1, 0.25, 0.5, 1, 2, 4, 8, 10),
+)
+CLASSIFICATION_DURATION = Histogram(
+    "classification_duration_seconds",
+    "Duration of a classification attempt after reservation.",
+    buckets=(0.1, 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60),
+)
+ALERT_REQUEST_DURATION = Histogram(
+    "alert_request_duration_seconds",
+    "Duration of HTTP requests to the on-call provider.",
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10),
+)
+TOTAL_PROCESSING_DURATION = Histogram(
+    "ticket_processing_duration_seconds",
+    "Time from durable classification job creation until completion.",
+    buckets=(0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600),
+)
+LLM_RATE_LIMIT_WAITS = Counter(
+    "llm_rate_limit_wait_total",
+    "Local waits imposed by the distributed LLM rate limiter.",
+)
+DATABASE_POOL_CAPACITY = Gauge(
+    "database_pool_capacity",
+    "Configured SQLAlchemy connection pool capacity, including overflow.",
+)
+DATABASE_POOL_CONNECTIONS = Gauge(
+    "database_pool_connections",
+    "Connections currently opened by this process.",
+)
+DATABASE_POOL_CHECKED_OUT = Gauge(
+    "database_pool_checked_out",
+    "Database connections currently checked out by this process.",
+)
+
+
+class ObservablePool(Protocol):
+    def checkedin(self) -> int: ...
+
+    def checkedout(self) -> int: ...
+
+
+def register_database_pool_metrics(pool: ObservablePool, *, capacity: int) -> None:
+    """Bind process-local pool gauges without creating database traffic."""
+
+    checked_in = pool.checkedin
+    checked_out = pool.checkedout
+    DATABASE_POOL_CAPACITY.set(capacity)
+    DATABASE_POOL_CONNECTIONS.set_function(lambda: checked_in() + checked_out())
+    DATABASE_POOL_CHECKED_OUT.set_function(checked_out)
 
 
 async def metrics_endpoint(_: Request) -> Response:

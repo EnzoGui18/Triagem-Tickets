@@ -9,6 +9,8 @@ from uuid import uuid4
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from triagem.core.metrics import LLM_RATE_LIMIT_WAITS
+
 _SLIDING_WINDOW_SCRIPT = """
 local key = KEYS[1]
 local request_limit = tonumber(ARGV[1])
@@ -108,4 +110,5 @@ class RedisSlidingWindowRateLimiter:
             decision = await self.try_acquire()
             if decision.allowed:
                 return
+            LLM_RATE_LIMIT_WAITS.inc()
             await asyncio.sleep(max(0.001, decision.retry_after_seconds))

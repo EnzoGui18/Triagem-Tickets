@@ -164,6 +164,13 @@ cujo nome indique Authorization, API key, e-mail, mensagem, saída bruta ou syst
 expõe métricas Prometheus em `/metrics`; cada worker inicia um exporter próprio na porta 8000 da
 rede interna. Contadores de custo são telemetria aproximada do protocolo Prometheus; os valores
 financeiros autoritativos continuam como `NUMERIC` calculado com `Decimal` no PostgreSQL.
+Histogramas cobrem ingestão, espera de fila, chamadas ao LLM, tentativas de classificação,
+chamadas ao plantão e tempo total. Gauges do pool SQLAlchemy são locais a cada processo.
+
+O Compose usa três classification workers por padrão, cada um ainda reservando um job por vez.
+Todos compartilham o rate limiter Redis de 5 novas chamadas/s. A API mantém pool PostgreSQL com
+capacidade total 15; workers usam pools de duas conexões sem overflow. Essas quantidades são
+configuráveis e os resultados medidos estão em `docs/performance-tuning-results.md`.
 
 O contrato limita `mensagem` a 12.000 caracteres antes da persistência e da fila. Assunto e mensagem
 são serializados como JSON no campo `input`; nunca são concatenados ao `system`. Conteúdo Unicode,

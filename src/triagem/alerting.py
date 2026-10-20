@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, Protocol
@@ -7,6 +8,7 @@ from typing import Any, Literal, Protocol
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
+from triagem.core.metrics import ALERT_REQUEST_DURATION
 from triagem.models import ClassificationCategory, Ticket
 
 
@@ -78,6 +80,7 @@ class PlantaoClient:
         self._http_client = http_client
 
     async def deliver(self, payload: AlertPayload) -> AlertProviderResult:
+        started_at = time.perf_counter()
         try:
             response = await self._http_client.post(
                 f"{self._base_url}/alertas",
@@ -88,6 +91,8 @@ class PlantaoClient:
             raise AlertTransientError(error_code="plantao_timeout") from error
         except httpx.RequestError as error:
             raise AlertTransientError(error_code="plantao_network_failure") from error
+        finally:
+            ALERT_REQUEST_DURATION.observe(max(0.0, time.perf_counter() - started_at))
 
         if response.status_code == httpx.codes.ACCEPTED:
             return AlertProviderResult(

@@ -12,6 +12,7 @@ from triagem.core.metrics import (
     LLM_INPUT_TOKENS,
     LLM_OUTPUT_TOKENS,
     LLM_RATE_LIMITED,
+    LLM_REQUEST_DURATION,
     LLM_REQUESTS,
 )
 from triagem.llm.circuit_breaker import (
@@ -164,6 +165,8 @@ class LLMClient:
             except Exception:
                 await self._record_success(permit)
                 raise
+            finally:
+                LLM_REQUEST_DURATION.observe(max(0.0, time.perf_counter() - started_at))
             await self._record_success(permit)
             LLM_INPUT_TOKENS.inc(result.usage.input_tokens)
             LLM_OUTPUT_TOKENS.inc(result.usage.output_tokens)

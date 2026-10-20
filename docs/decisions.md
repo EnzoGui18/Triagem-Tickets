@@ -179,3 +179,18 @@ A revisão inicial do Alembic é deliberadamente vazia: ela estabelece o baselin
 - A mensagem é limitada a 12.000 caracteres na validação de entrada para manter folga sob o limite
   aproximado de contexto do provedor. O sistema não tenta sanitizar ou interpretar HTML, JSON ou
   instruções no texto; preserva o conteúdo como dado não confiável no campo `input`.
+
+## Performance e capacidade
+
+- O Compose inicia três classification workers por padrão. O valor é configurável e foi escolhido
+  após comparar uma, três e cinco réplicas: três reduziram a espera da fila sem adotar a maior
+  contenção de ingestão observada com cinco no host de teste.
+- O batch de reserva continua unitário. Como cada chamada passa pelo limite global de 5 req/s,
+  pré-reservar jobs aumentaria exposição a lease sem aumentar a taxa permitida.
+- O pool da API mantém capacidade total 15 (5 + 10 overflow). Um experimento com 25 conexões
+  piorou os percentis e foi descartado. Workers usam pools menores porque processam um job por vez.
+- O lease de classificação é 60 s e o polling é 0,5 s. O aumento do lease cobre a cauda medida e
+  reduz recuperação prematura; fencing por `locked_by/attempt_count` permanece inalterado.
+- Índices parciais acompanham polling e recuperação de lease. A classificação atual possui índice
+  composto por ticket e ordem decrescente. Métricas de latência e pool são operacionais; tabelas
+  PostgreSQL continuam sendo a fonte autoritativa.

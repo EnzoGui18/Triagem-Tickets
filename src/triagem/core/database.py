@@ -1,16 +1,28 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import cast
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncAttrs, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
 from triagem.core.config import get_settings
+from triagem.core.metrics import ObservablePool, register_database_pool_metrics
 
 settings = get_settings()
 
-engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+engine = create_async_engine(
+    settings.database_url,
+    pool_pre_ping=True,
+    pool_size=settings.database_pool_size,
+    max_overflow=settings.database_max_overflow,
+    pool_timeout=settings.database_pool_timeout_seconds,
+)
+register_database_pool_metrics(
+    cast(ObservablePool, engine.sync_engine.pool),
+    capacity=settings.database_pool_size + settings.database_max_overflow,
+)
 async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

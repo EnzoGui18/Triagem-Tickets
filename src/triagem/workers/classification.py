@@ -6,6 +6,7 @@ import math
 import os
 import random
 import socket
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -25,11 +26,14 @@ from triagem.core.config import get_settings
 from triagem.core.database import async_session_factory, engine
 from triagem.core.metrics import (
     CLASSIFICATION_COMPLETED,
+    CLASSIFICATION_DURATION,
     CLASSIFICATION_FAILED,
     CLASSIFICATION_QUEUE_DEPTH,
+    CLASSIFICATION_QUEUE_WAIT,
     CLASSIFICATION_RETRY,
     LLM_COST_USD,
     LLM_ERRORS,
+    TOTAL_PROCESSING_DURATION,
     start_worker_metrics_server,
 )
 from triagem.core.redis import redis_client
@@ -100,6 +104,7 @@ class CompletedClassification:
     classification_id: UUID
     alert_id: UUID | None
     total_cost: Decimal
+    total_processing_seconds: float
 
 
 class ClassifierVersionConflictError(Exception):
@@ -213,6 +218,7 @@ class ClassificationWorker:
         self.max_retry_delay = max_retry_delay
         self._jitter_source = jitter_source
         self.poll_interval_seconds = poll_interval_seconds
+        self._resolved_classifier_version_id: UUID | None = None
 
     async def reserve_next_job(self) -> ReservedJob | None:
         async with self._session_factory() as session, session.begin():
@@ -264,6 +270,10 @@ class ClassificationWorker:
                 )
                 or 1
             )
+            if attempt_number == 1:
+                CLASSIFICATION_QUEUE_WAIT.observe(
+                    max(0.0, (now - job.created_at).total_seconds())
+                )
             attempt = ClassificationAttempt(
                 processing_job_id=job.id,
                 attempt_number=attempt_number,
@@ -291,6 +301,8 @@ class ClassificationWorker:
         reserved_job = await self.reserve_next_job()
         if reserved_job is None:
             return False
+
+        processing_started_at = time.perf_counter()
 
         log_event(
             logger,
@@ -328,6 +340,9 @@ class ClassificationWorker:
                     error_code=recorded.error_code,
                     next_retry_at=recorded.next_retry_at,
                 )
+            CLASSIFICATION_DURATION.observe(
+                max(0.0, time.perf_counter() - processing_started_at)
+            )
             return True
 
         completed = await self._complete_job(
@@ -350,6 +365,7 @@ class ClassificationWorker:
             # Prometheus samples are floating point by protocol; the persisted Decimal remains
             # the source of truth for financial reporting.
             LLM_COST_USD.inc(float(completed.total_cost))
+            TOTAL_PROCESSING_DURATION.observe(completed.total_processing_seconds)
             log_event(
                 logger,
                 logging.INFO,
@@ -371,6 +387,9 @@ class ClassificationWorker:
                     alert_id=completed.alert_id,
                     worker_id=self.worker_id,
                 )
+        CLASSIFICATION_DURATION.observe(
+            max(0.0, time.perf_counter() - processing_started_at)
+        )
         return True
 
     async def run_until_idle(self) -> int:
@@ -546,6 +565,10 @@ class ClassificationWorker:
                 classification_id=classification.id,
                 alert_id=alert_delivery.id if alert_delivery is not None else None,
                 total_cost=costs.total_cost,
+                total_processing_seconds=max(
+                    0.0,
+                    (now - job.created_at).total_seconds(),
+                ),
             )
 
     async def _record_failure(
@@ -650,8 +673,12 @@ class ClassificationWorker:
         )
 
     async def _resolve_classifier_version_id(self) -> UUID:
+        if self._resolved_classifier_version_id is not None:
+            return self._resolved_classifier_version_id
         async with self._session_factory() as session, session.begin():
-            return await self._classifier_version_id(session)
+            classifier_version_id = await self._classifier_version_id(session)
+        self._resolved_classifier_version_id = classifier_version_id
+        return classifier_version_id
 
     async def _classifier_version_id(self, session: AsyncSession) -> UUID:
         identity = self._classifier.identity

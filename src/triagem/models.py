@@ -188,6 +188,12 @@ class Classification(Base):
             name="ck_classification_total_cost",
         ),
         Index("ix_classifications_ticket_id", "ticket_id"),
+        Index(
+            "ix_classifications_ticket_latest",
+            "ticket_id",
+            text("created_at DESC"),
+            text("id DESC"),
+        ),
         Index("ix_classifications_classifier_version_id", "classifier_version_id"),
         Index("ix_classifications_created_at", "created_at"),
         Index("ix_classifications_category_created_at", "category", "created_at"),
@@ -264,10 +270,18 @@ class ProcessingJob(TimestampMixin, Base):
         Index("ix_processing_jobs_classification_id", "classification_id"),
         Index(
             "ix_processing_jobs_polling",
-            "status",
+            "job_type",
+            text("queue_priority DESC"),
             "available_at",
-            "queue_priority",
+            "created_at",
+            "id",
             postgresql_where=text("status IN ('pending', 'retry_scheduled')"),
+        ),
+        Index(
+            "ix_processing_jobs_lease_recovery",
+            "job_type",
+            "locked_at",
+            postgresql_where=text("status = 'processing'"),
         ),
     )
 

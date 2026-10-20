@@ -85,6 +85,9 @@ system prompt.
 As métricas Prometheus da API estão em `/metrics`. Cada worker também expõe métricas na porta
 configurada por `METRICS_PORT` (8000 por padrão) dentro da rede Docker. Como são processos
 separados, um coletor deve fazer scrape de `api`, `classification-worker` e `alert-worker`.
+O Compose inicia três réplicas do classification worker por padrão; a quantidade pode ser alterada
+por `CLASSIFICATION_WORKER_REPLICAS` sem mudar o limite global de 5 req/s. Resultados e limitações
+da medição estão documentados em `docs/performance-tuning-results.md`.
 
 `mensagem` aceita no máximo 12.000 caracteres. O conteúdo continua sendo tratado como dado não
 confiável: HTML, JSON e instruções no texto são serializados apenas no campo `input` do LLM. O
