@@ -21,7 +21,7 @@ class DependencyChecks(BaseModel):
 
 
 class ReadinessResponse(BaseModel):
-    status: Literal["ok", "error"]
+    status: Literal["ok", "degraded", "error"]
     checks: DependencyChecks
 
 
@@ -42,13 +42,13 @@ async def readiness(
         postgresql="ok" if checks["postgresql"] else "error",
         redis="ok" if checks["redis"] else "error",
     )
-    response = ReadinessResponse(
-        status="ok" if all(checks.values()) else "error",
-        checks=dependencies,
-    )
-    if response.status == "error":
+    if not checks["postgresql"]:
+        response = ReadinessResponse(status="error", checks=dependencies)
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content=response.model_dump(),
         )
-    return response
+    return ReadinessResponse(
+        status="ok" if checks["redis"] else "degraded",
+        checks=dependencies,
+    )

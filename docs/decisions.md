@@ -9,7 +9,14 @@
 ## Inicialização e saúde
 
 - Migrações são executadas por um serviço de execução única antes da API no Compose.
-- Falhas de PostgreSQL ou Redis não impedem o processo da API de iniciar; elas tornam `/health/ready` indisponível com HTTP 503.
+- Liveness significa apenas que o processo da API está vivo.
+- Readiness significa que a API pode ingerir e confirmar tickets com durabilidade. PostgreSQL
+  indisponível retorna HTTP 503 e `status=error`.
+- Redis indisponível permanece explícito em `checks.redis=error`, mas com PostgreSQL saudável o
+  readiness retorna HTTP 200 e `status=degraded`; a API não é retirada da ingestão por uma
+  dependência usada somente no processamento assíncrono.
+- Classification workers continuam dependendo do Redis e falham fechado para não violar rate
+  limit nem operar o circuit breaker sem coordenação distribuída.
 - Provedores externos não fazem parte do readiness, permitindo que a ingestão futura continue independente deles.
 
 ## Escopo

@@ -15,7 +15,7 @@ Endpoints:
 | Método e rota | Finalidade |
 |---|---|
 | `GET /health/live` | Verifica se o processo da API está ativo |
-| `GET /health/ready` | Verifica PostgreSQL e Redis |
+| `GET /health/ready` | Verifica se a API pode ingerir com durabilidade e informa degradações |
 | `GET /metrics` | Expõe métricas Prometheus do processo da API |
 | `POST /tickets` | Valida e persiste ticket e job; retorna HTTP 202 |
 | `GET /tickets/{external_id}` | Retorna ticket, classificação atual e processamento pendente |
@@ -64,9 +64,14 @@ O Compose inicia uma API, três réplicas do `classification-worker` e um `alert
 possui pool PostgreSQL de 5 conexões mais 10 de overflow; cada worker usa pool de 2 conexões sem
 overflow.
 
-`/health/live` depende apenas do processo. `/health/ready` verifica PostgreSQL e Redis, mas não
-LLM ou plantão. Isso permite que a API continue aceitando tickets durante indisponibilidade dos
-provedores externos.
+`/health/live` informa somente que o processo da API está vivo. `/health/ready` representa a
+capacidade da API de ingerir com durabilidade: PostgreSQL indisponível resulta em HTTP 503;
+PostgreSQL saudável com Redis indisponível resulta em HTTP 200 e `status=degraded`, mantendo
+`checks.redis=error` visível. LLM e plantão não participam do readiness.
+
+Redis é uma dependência operacional degradável da API, não da ingestão. Os classification workers
+continuam dependendo dele para coordenar rate limit e circuit breaker com segurança e falham
+fechado enquanto estiver indisponível.
 
 ## 4. Fluxo de ingestão
 
@@ -555,7 +560,7 @@ ingestão.
 | LLM indisponível | `POST /admin/outage?segundos=60` no `llm-sim` | `POST /tickets` continua 202; jobs retomam após o outage |
 | Worker de classificação parado | `docker compose stop classification-worker` | Tickets e jobs permanecem no PostgreSQL |
 | Worker de alerta parado | `docker compose stop alert-worker` | Classificação urgente cria alerta pendente sem chamar novamente o LLM |
-| Redis parado | `docker compose stop redis` | Readiness 503; ingestão continua 202; classificação aguarda |
+| Redis parado | `docker compose stop redis` | Readiness 200/degraded; ingestão continua 202; classificação aguarda |
 | Ticket duplicado | Repetir exatamente o POST | Mesmo UUID, um ticket e um job |
 | Conflito idempotente | Repetir o `external_id` alterando o payload | HTTP 409 |
 | Payload inválido | Enviar mensagem vazia ou timestamp sem fuso | HTTP 422, sem persistência |

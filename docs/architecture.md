@@ -2,7 +2,10 @@
 
 Nesta fase, a aplicação é uma API FastAPI assíncrona com PostgreSQL como banco de dados e Redis para coordenação operacional. SQLAlchemy usa o driver `asyncpg`, e o esquema do banco é versionado pelo Alembic.
 
-O processo da API não exige disponibilidade de serviços externos para iniciar. O liveness verifica apenas o processo; o readiness consulta PostgreSQL e Redis. `llm-sim` e `plantao` não participam do readiness.
+O processo da API não exige disponibilidade de serviços externos para iniciar. O liveness verifica
+apenas o processo. O readiness da API representa aptidão para ingestão durável: PostgreSQL é
+crítico; Redis é verificado e reportado, mas sua falha deixa a resposta `degraded` com HTTP 200.
+`llm-sim` e `plantao` não participam do readiness.
 
 Os containers compartilham a rede Docker externa `desafio-kit`. Uma execução isolada de migração termina antes do início da API.
 
@@ -42,6 +45,10 @@ cálculo da taxa temporal.
 
 O estado da janela possui TTL e é apenas coordenação operacional. Tickets, jobs e classificações
 continuam armazenados exclusivamente no PostgreSQL.
+
+Essa dependência continua obrigatória para os classification workers, que falham fechado sem
+coordenação segura. Ela é degradável somente para a API, porque `POST /tickets` confirma ticket e
+job exclusivamente no PostgreSQL e não acessa o Redis.
 
 ## Circuit breaker do LLM
 
