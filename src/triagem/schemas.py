@@ -31,7 +31,6 @@ CustomerName = Annotated[
 ]
 Subject = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
 Channel = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=50)]
-MAX_TICKET_MESSAGE_LENGTH = 12_000
 
 
 class CustomerPayload(BaseModel):
@@ -48,11 +47,7 @@ class TicketPayload(BaseModel):
     external_id: ExternalId
     customer: CustomerPayload = Field(alias="cliente")
     subject: Subject = Field(alias="assunto")
-    message: str = Field(
-        alias="mensagem",
-        min_length=1,
-        max_length=MAX_TICKET_MESSAGE_LENGTH,
-    )
+    message: str = Field(alias="mensagem", min_length=1)
     channel: Channel = Field(alias="canal")
     source_created_at: datetime = Field(alias="criado_em")
 

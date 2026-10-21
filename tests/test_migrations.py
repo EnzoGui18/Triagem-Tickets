@@ -116,6 +116,24 @@ async def _classification_costs(
     return row[0], row[1], row[2]
 
 
+async def _classification_input_truncated(
+    database_url: str,
+    classification_id: str,
+) -> bool:
+    test_engine = create_async_engine(database_url)
+    async with test_engine.connect() as connection:
+        value = await connection.scalar(
+            text(
+                "SELECT input_truncated FROM classifications "
+                "WHERE id = CAST(:classification_id AS uuid)"
+            ),
+            {"classification_id": classification_id},
+        )
+    await test_engine.dispose()
+    assert isinstance(value, bool)
+    return value
+
+
 async def test_migrations_upgrade_and_downgrade(migrated_database_url: str) -> None:
     assert DOMAIN_TABLES <= await _table_names(migrated_database_url)
     assert {
@@ -124,6 +142,7 @@ async def test_migrations_upgrade_and_downgrade(migrated_database_url: str) -> N
         "input_cost",
         "output_cost",
         "total_cost",
+        "input_truncated",
     } <= await _classification_columns(migrated_database_url)
     assert "ix_classifications_ticket_latest" in await _index_names(
         migrated_database_url,
@@ -149,6 +168,10 @@ async def test_migrations_upgrade_and_downgrade(migrated_database_url: str) -> N
             Decimal("0.00001920"),
             Decimal("0.00003160"),
         )
+        assert await _classification_input_truncated(
+            migrated_database_url,
+            classification_id,
+        ) is False
 
         await run_alembic(migrated_database_url, "downgrade", "20261016_0001")
         assert DOMAIN_TABLES.isdisjoint(await _table_names(migrated_database_url))

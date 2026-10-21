@@ -501,6 +501,7 @@ class ClassificationWorker:
                 output_cost=costs.output_cost,
                 total_cost=costs.total_cost,
                 provider_latency_ms=result.provider_latency_ms,
+                input_truncated=result.input_truncated,
                 created_at=now,
             )
             session.add(classification)

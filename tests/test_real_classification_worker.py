@@ -13,6 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from triagem.classifiers import ClassificationResult, FakeClassifier, LLMClassifier
 from triagem.llm.circuit_breaker import AlwaysClosedCircuitBreaker
 from triagem.llm.client import LLMClient
+from triagem.llm.prompt import (
+    CLASSIFIER_INPUT_MAX_CHARS,
+    CLASSIFIER_TRUNCATION_MARKER,
+)
 from triagem.models import (
     Classification,
     ClassificationCategory,
@@ -218,10 +222,91 @@ async def test_real_worker_retries_then_persists_provider_result(
     assert classification.total_cost == Decimal("0.00003160")
     assert classification.provider_latency_ms is not None
     assert classification.provider_latency_ms >= 0
+    assert classification.input_truncated is False
     assert classification.created_at is not None
     assert version is not None
     assert version.model_name == "triagem-sim-1"
     assert version.version == "classifier-v1"
+
+
+async def test_large_ticket_input_is_bounded_and_audited(
+    real_worker_session_factory: async_sessionmaker[AsyncSession],
+    api_client: httpx.AsyncClient,
+) -> None:
+    beginning = "INICIO-DO-TICKET"
+    ending = "FINAL-DO-TICKET"
+    message = beginning + ("x" * (54_000 - len(beginning) - len(ending))) + ending
+    external_id = f"large-worker-{uuid4()}"
+
+    response = await api_client.post(
+        "/tickets",
+        json={
+            "external_id": external_id,
+            "cliente": {
+                "id": "customer-large-worker",
+                "nome": "Cliente grande",
+                "email": "large-worker@example.com",
+            },
+            "assunto": "Pedido atrasado",
+            "mensagem": message,
+            "canal": "web",
+            "criado_em": datetime.now(UTC).isoformat(),
+        },
+    )
+    assert response.status_code == httpx.codes.ACCEPTED
+
+    async with real_worker_session_factory() as session:
+        persisted_ticket = await session.scalar(
+            select(Ticket).where(Ticket.external_id == external_id)
+        )
+        assert persisted_ticket is not None
+        ticket_id = persisted_ticket.id
+        persisted_job = await session.scalar(
+            select(ProcessingJob).where(
+                ProcessingJob.ticket_id == ticket_id,
+                ProcessingJob.job_type == JobType.CLASSIFICATION,
+            )
+        )
+        assert persisted_job is not None
+        job_id = persisted_job.id
+
+    submitted_inputs: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_payload = json.loads(request.content)
+        submitted_inputs.append(request_payload["input"])
+        return _provider_success(
+            output_text=_valid_output(),
+            generation_id="gen-large-ticket",
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        worker = _real_worker(
+            real_worker_session_factory,
+            http_client,
+            worker_id=f"worker-large-ticket-{uuid4()}",
+        )
+        assert await worker.run_once() is True
+
+    async with real_worker_session_factory() as session:
+        ticket = await session.get(Ticket, ticket_id)
+        job = await session.get(ProcessingJob, job_id)
+        classification = await session.scalar(
+            select(Classification).where(Classification.ticket_id == ticket_id)
+        )
+
+    assert ticket is not None
+    assert ticket.message == message
+    assert job is not None
+    assert job.status == JobStatus.COMPLETED
+    assert classification is not None
+    assert classification.input_truncated is True
+    assert len(submitted_inputs) == 1
+    assert len(submitted_inputs[0]) <= CLASSIFIER_INPUT_MAX_CHARS
+    submitted_message = json.loads(submitted_inputs[0])["mensagem"]
+    assert submitted_message.startswith(beginning)
+    assert submitted_message.endswith(ending)
+    assert CLASSIFIER_TRUNCATION_MARKER in submitted_message
 
 
 async def test_rate_limit_retry_after_is_persisted_without_sleeping(

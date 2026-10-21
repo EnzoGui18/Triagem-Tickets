@@ -19,9 +19,11 @@ resposta de domínio.
 
 O prompt `classifier-v1` mantém instruções exclusivamente em `system`. O campo `input` contém
 um JSON apenas com assunto e mensagem; identificadores e dados pessoais do cliente não são
-enviados. O parser aceita JSON puro, uma cerca markdown ou um único objeto com pequeno texto ao
-redor. Em todos os casos, o objeto passa pelo mesmo schema Pydantic e valores fora dos enums não
-são convertidos.
+enviados. Esse JSON possui orçamento conservador de 8.000 caracteres. Quando necessário, somente
+a mensagem enviada ao provedor é reduzida, preservando partes do começo e do final; o ticket
+persistido permanece integral e a classificação registra se houve truncamento. O parser aceita
+JSON puro, uma cerca markdown ou um único objeto com pequeno texto ao redor. Em todos os casos, o
+objeto passa pelo mesmo schema Pydantic e valores fora dos enums não são convertidos.
 
 Nenhum desses componentes participa do readiness. A indisponibilidade do `llm-sim` continua sem
 impedir a API de receber tickets.
@@ -172,8 +174,10 @@ Todos compartilham o rate limiter Redis de 5 novas chamadas/s. A API mantém poo
 capacidade total 15; workers usam pools de duas conexões sem overflow. Essas quantidades são
 configuráveis e os resultados medidos estão em `docs/performance-tuning-results.md`.
 
-O contrato limita `mensagem` a 12.000 caracteres antes da persistência e da fila. Assunto e mensagem
-são serializados como JSON no campo `input`; nunca são concatenados ao `system`. Conteúdo Unicode,
-HTML, JSON ou instruções adversariais permanece dado, mas o prompt não é tratado como barreira de
-segurança. Enums Pydantic, parser estrito, limites de tamanho, retries limitados e isolamento dos
-efeitos urgentes continuam sendo as fronteiras aplicadas pelo sistema.
+O contrato exige uma `mensagem` não vazia e a persiste integralmente. Assunto e mensagem são
+serializados como JSON no campo `input`; nunca são concatenados ao `system`. Apenas esse input do
+classificador é limitado a 8.000 caracteres, com margem para o system prompt e a saída dentro do
+contexto aproximado de 4.000 tokens do simulador. Conteúdo Unicode, HTML, JSON ou instruções
+adversariais permanece dado, mas o prompt não é tratado como barreira de segurança. Enums Pydantic,
+parser estrito, orçamento explícito, retries limitados e isolamento dos efeitos urgentes continuam
+sendo as fronteiras aplicadas pelo sistema.

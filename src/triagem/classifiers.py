@@ -40,6 +40,7 @@ class ClassificationResult:
     provider_model: str | None = None
     raw_output: str | None = None
     provider_latency_ms: int | None = None
+    input_truncated: bool = False
 
 
 class Classifier(Protocol):
@@ -60,9 +61,13 @@ class LLMClassifier:
         )
 
     async def classify(self, ticket: Ticket) -> ClassificationResult:
+        classifier_input = build_classifier_input(
+            subject=ticket.subject,
+            message=ticket.message,
+        )
         generation = await self._client.generate(
             system=CLASSIFIER_V1_SYSTEM_PROMPT,
-            input_text=build_classifier_input(subject=ticket.subject, message=ticket.message),
+            input_text=classifier_input.text,
         )
         parsed = parse_classification_output(generation.output_text)
         return ClassificationResult(
@@ -76,6 +81,7 @@ class LLMClassifier:
             input_tokens=generation.usage.input_tokens,
             output_tokens=generation.usage.output_tokens,
             provider_latency_ms=generation.latency_ms,
+            input_truncated=classifier_input.truncated,
         )
 
 

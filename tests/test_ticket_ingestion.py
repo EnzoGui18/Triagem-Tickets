@@ -130,6 +130,47 @@ async def test_concurrent_retries_create_one_ticket_and_one_job(
     assert await _record_counts(migrated_database_url, external_id) == (1, 1, 0)
 
 
+async def test_large_ticket_is_preserved_and_remains_idempotent(
+    api_client: AsyncClient,
+    migrated_database_url: str,
+) -> None:
+    external_id = f"ticket-large-{uuid4()}"
+    message = "I" + ("x" * 53_998) + "F"
+    payload = _payload(external_id)
+    payload["mensagem"] = message
+
+    first_response = await api_client.post("/tickets", json=payload)
+    second_response = await api_client.post("/tickets", json=payload)
+
+    assert first_response.status_code == status.HTTP_202_ACCEPTED
+    assert second_response.status_code == status.HTTP_202_ACCEPTED
+    assert second_response.json() == first_response.json()
+
+    test_engine = create_async_engine(migrated_database_url)
+    try:
+        async with AsyncSession(test_engine) as session:
+            ticket = await session.scalar(
+                select(Ticket).where(Ticket.external_id == external_id)
+            )
+            jobs = list(
+                (
+                    await session.scalars(
+                        select(ProcessingJob).where(
+                            ProcessingJob.ticket_id == ticket.id,
+                            ProcessingJob.job_type == JobType.CLASSIFICATION,
+                        )
+                    )
+                ).all()
+            ) if ticket is not None else []
+    finally:
+        await test_engine.dispose()
+
+    assert ticket is not None
+    assert ticket.message == message
+    assert len(ticket.message) == 54_000
+    assert len(jobs) == 1
+
+
 async def test_database_failure_does_not_return_success() -> None:
     async def unavailable_session() -> AsyncIterator[AsyncSession]:
         raise OperationalError("BEGIN", {}, RuntimeError("database unavailable"))

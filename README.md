@@ -85,8 +85,9 @@ Contrato de entrada:
 }
 ```
 
-`mensagem` é obrigatória e aceita no máximo 12.000 caracteres; `criado_em` precisa ter fuso
-horário. E-mail, campos vazios e demais limites são validados pelo Pydantic.
+`mensagem` é obrigatória e não pode conter apenas espaços; `criado_em` precisa ter fuso horário.
+E-mail, campos vazios e os limites dos demais campos são validados pelo Pydantic. O conteúdo
+integral da mensagem é persistido antes do processamento assíncrono.
 
 ```mermaid
 sequenceDiagram
@@ -136,7 +137,8 @@ redor. A saída sempre passa por validação estrutural e semântica. Valores fo
 convertidos: por exemplo, `critical` não vira `urgente`.
 
 Campos persistidos incluem categoria, prioridade, sentimento, sugestão de resposta, versão do
-classificador, id e modelo do provedor, saída bruta validada, usage, custos e timestamps.
+classificador, id e modelo do provedor, saída bruta validada, usage, custos, indicação de
+truncamento do input e timestamps.
 
 ## 6. Fluxo de alertas
 
@@ -321,7 +323,8 @@ do protocolo; o valor financeiro autoritativo é o `Decimal` do PostgreSQL.
   logs operacionais.
 - `X-Request-ID` é aceito somente com formato seguro e até 128 caracteres; valores hostis são
   substituídos por UUID.
-- Mensagens possuem limite de 12.000 caracteres antes da persistência e da fila.
+- Mensagens são persistidas integralmente; somente o input serializado do classificador é limitado
+  a 8.000 caracteres, preservando o começo e o final quando houver truncamento.
 - Enums e schemas Pydantic validam a saída do LLM; o prompt não é tratado como fronteira de
   segurança.
 - A credencial presente no `.env.example` é somente a chave pública do simulador oficial. Segredos

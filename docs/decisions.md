@@ -61,6 +61,9 @@ A revisão inicial do Alembic é deliberadamente vazia: ela estabelece o baselin
   `LLMClassifier` compõe esses módulos e é a implementação usada pelo worker de produção.
 - `classifier-v1` envia somente assunto e mensagem no campo `input`. Instruções ficam em
   `system`, que declara explicitamente que o ticket é dado não confiável.
+- O ticket é aceito e persistido integralmente independentemente do contexto do provedor. O JSON
+  enviado ao classificador possui orçamento de 8.000 caracteres; entradas maiores preservam o
+  começo e o final da mensagem, e `classifications.input_truncated` registra a redução.
 - O parser só extrai um único objeto JSON completo. Texto externo é aceito apenas quando curto e
   sem estruturas JSON concorrentes; depois disso, Pydantic valida campos obrigatórios e enums sem
   normalização semântica.
@@ -176,9 +179,10 @@ A revisão inicial do Alembic é deliberadamente vazia: ela estabelece o baselin
 - A soma `llm_cost_usd_total` é somente telemetria em ponto flutuante exigida pelo formato
   Prometheus. Cálculo, persistência e relatórios financeiros usam exclusivamente `Decimal` e
   `NUMERIC(20, 8)` no PostgreSQL.
-- A mensagem é limitada a 12.000 caracteres na validação de entrada para manter folga sob o limite
-  aproximado de contexto do provedor. O sistema não tenta sanitizar ou interpretar HTML, JSON ou
-  instruções no texto; preserva o conteúdo como dado não confiável no campo `input`.
+- A validação HTTP não reutiliza o limite de contexto do provedor: a mensagem não vazia é
+  persistida integralmente. O sistema não tenta sanitizar ou interpretar HTML, JSON ou instruções
+  no texto; ao montar o campo `input`, aplica orçamento conservador de 8.000 caracteres e preserva
+  o começo e o final do conteúdo como dado não confiável.
 
 ## Performance e capacidade
 
