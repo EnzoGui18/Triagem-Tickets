@@ -245,3 +245,14 @@ A revisão inicial do Alembic é deliberadamente vazia: ela estabelece o baselin
 - Índices parciais acompanham polling e recuperação de lease. A classificação atual possui índice
   composto por ticket e ordem decrescente. Métricas de latência e pool são operacionais; tabelas
   PostgreSQL continuam sendo a fonte autoritativa.
+
+## Integração contínua e dependências
+
+- O CI separa lint, tipos, testes, migrations e build Docker para que cada fronteira tenha status
+  próprio no GitHub.
+- Testes integrados usam PostgreSQL 16 e Redis 7 efêmeros. O kit oficial permanece fora do CI
+  principal porque os clientes externos já são cobertos por transports controlados e testes E2E
+  continuam documentados separadamente.
+- Não foi adicionado `uv.lock` nesta etapa. Introduzir outro gerenciador sem migrar também Docker e
+  fluxo local criaria duas fontes de instalação; um lockfile único para todos os ambientes fica
+  registrado como melhoria futura.

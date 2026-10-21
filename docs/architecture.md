@@ -226,3 +226,10 @@ contexto aproximado de 4.000 tokens do simulador. Conteúdo Unicode, HTML, JSON 
 adversariais permanece dado, mas o prompt não é tratado como barreira de segurança. Enums Pydantic,
 parser estrito, orçamento explícito, retries limitados e isolamento dos efeitos urgentes continuam
 sendo as fronteiras aplicadas pelo sistema.
+
+## Integração contínua
+
+O GitHub Actions executa lint, análise de tipos, testes, validação de migrations e build da imagem
+em jobs independentes com Python 3.12. Testes recebem PostgreSQL 16 e Redis 7 como service
+containers efêmeros; nenhuma chamada ao kit oficial, ao LLM ou ao plantão faz parte desse pipeline.
+O mesmo `pyproject.toml` e os mesmos comandos documentados localmente são usados no CI.

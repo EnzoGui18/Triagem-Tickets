@@ -546,6 +546,16 @@ docker compose --profile test run --rm test
 docker compose run --rm migrate alembic check
 ```
 
+O workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) executa automaticamente em
+pushes, pull requests e acionamento manual. Os checks separados são `Lint`, `Types`, `Tests`,
+`Migrations` e `Docker build`. Os testes usam serviços efêmeros PostgreSQL 16 e Redis 7 no GitHub
+Actions; o kit oficial e seus simuladores não são necessários no CI principal.
+
+O CI usa Python 3.12 e o mesmo comando de instalação local, `pip install -e ".[dev]"`. Um
+`uv.lock` não foi introduzido nesta fase para não criar um segundo fluxo de instalação diferente
+do Docker e da documentação já validados. Fixar transitivamente as dependências com um único
+lockfile para desenvolvimento, CI e imagens permanece uma evolução futura.
+
 Os testes cobrem validação, idempotência concorrente, constraints, upgrade/downgrade de migrations,
 workers concorrentes, lease recovery, parser, rate limiter distribuído, circuit breaker, custos,
 consultas, alertas, timeline, observabilidade e inputs hostis.
@@ -717,4 +727,5 @@ preservada.
 - adicionar fluxo administrativo de reprocessamento para jobs terminais;
 - agregar métricas dos processos em Prometheus e criar alertas operacionais;
 - aplicar autenticação, autorização, gestão de segredos e políticas de retenção;
-- negociar chave de idempotência com o plantão para reduzir duplicações de alertas.
+- negociar chave de idempotência com o plantão para reduzir duplicações de alertas;
+- avaliar um único lockfile, consumido de forma consistente por ambiente local, CI e Docker.
