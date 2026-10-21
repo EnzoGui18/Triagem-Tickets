@@ -214,6 +214,12 @@ Ticket e job são confirmados no mesmo commit.
 Os workers reservam um job por vez com `SELECT ... FOR UPDATE SKIP LOCKED`. A reserva é
 confirmada antes de qualquer HTTP externo, evitando manter locks durante chamadas lentas.
 
+Novos jobs recebem `queue_priority=100` quando assunto ou mensagem contêm indícios fortes de
+fraude, invasão de conta, cartão clonado, cobrança não reconhecida ou duplicada, comprometimento
+de segurança, urgência explícita ou emergência. Os demais recebem `0`. Essa heurística define
+somente a ordem da fila: categoria, prioridade final, sentimento e alertas continuam dependendo
+exclusivamente do resultado validado do LLM.
+
 ```mermaid
 stateDiagram-v2
     [*] --> pending
@@ -345,6 +351,8 @@ Eventos principais:
 - `classification_started`, `classification_retry`, `classification_completed` e
   `classification_failed`;
 - `alert_created`, `alert_attempt`, `alert_retry`, `alert_delivered` e `alert_failed`.
+
+Os eventos de ingestão incluem `queue_priority`, mas não incluem assunto ou mensagem do cliente.
 
 Métricas principais:
 
@@ -536,6 +544,9 @@ são resultados observados, não estimativas de produção.
 
 ### 20.1 Revisão de entrega — 2026-10-20
 
+Esta medição antecede a Fase Final 1; os cinco HTTP 422 abaixo refletem o antigo limite de
+mensagem e são preservados apenas como resultado histórico, não como comportamento atual.
+
 Em clone limpo, com banco e volumes novos:
 
 | Execução | Aceitos | Rejeitados | Falhas de envio | Retries do cliente |
@@ -622,6 +633,14 @@ compartilhado. Cinco workers tiveram contenção maior e não foram adotados com
 O rate limiter falha fechado quando Redis está indisponível. Isso preserva o contrato de 5 req/s,
 mas pausa classificações até a coordenação voltar. A ingestão continua porque não usa Redis.
 
+### Sensibilidade versus justiça da fila
+
+A heurística de agendamento privilegia recall: falsos positivos podem consumir capacidade antes
+de tickets comuns, e uma chegada sustentada de sinais elevados pode aumentar a espera da fila
+normal. Ela não antecipa a classificação nem cria alerta; apenas melhora o tempo até o LLM para
+tickets potencialmente urgentes. Dentro da mesma prioridade, a ordem temporal continua sendo
+preservada.
+
 ## 22. Limitações
 
 - A quota de 5 novas chamadas/s é o principal limite de vazão da classificação.
@@ -643,8 +662,8 @@ mas pausa classificações até a coordenação voltar. A ingestão continua por
 
 - integrar múltiplos provedores com política explícita de fallback, custo e versionamento;
 - negociar aumento de quota para remover o teto atual de 5 novas chamadas/s;
-- adicionar classificação preliminar local para roteamento ou redução de chamadas externas;
-- usar `queue_priority` dinamicamente para classes de tickets com SLA diferente;
+- avaliar classificação preliminar local apenas se houver necessidade além do agendamento
+  heurístico atual;
 - adotar modelos especializados por categoria ou complexidade;
 - migrar para filas ou brokers dedicados quando volume e operação justificarem, preservando
   atomicidade com outbox/inbox;

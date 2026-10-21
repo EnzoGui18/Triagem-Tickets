@@ -55,6 +55,21 @@ A revisão inicial do Alembic é deliberadamente vazia: ela estabelece o baselin
   identidade com prompt ou schema diferente falha antes da chamada ao LLM, em vez de associar a
   nova classificação a metadados incorretos.
 
+## Priorização da fila de classificação
+
+- Uma função pura normaliza caixa e acentos de assunto e mensagem e retorna somente `0` ou `100`
+  para `processing_jobs.queue_priority`.
+- Sinais elevados cobrem fraude, invasão ou comprometimento de conta, cartão clonado, cobranças ou
+  compras não reconhecidas/duplicadas e urgência explícita. Não existem IDs ou resultados do
+  dataset na regra.
+- O scheduler não produz campos de classificação nem alertas. Categoria, prioridade final,
+  sentimento e efeitos urgentes continuam exclusivos do resultado validado do LLM.
+- O worker preserva `queue_priority DESC` e usa disponibilidade, criação e UUID como desempates.
+  Isso melhora o tempo até o LLM para possíveis urgências, mas aceita falsos positivos e possível
+  aumento da espera dos jobs normais sob fluxo elevado sustentado.
+- O log de ingestão registra apenas o valor controlado de `queue_priority`, nunca o conteúdo do
+  ticket. A estrutura e os índices existentes já suportam os valores `0..100`; não há migration.
+
 ## Fronteira com o provedor de IA
 
 - A integração com `llm-sim` permanece separada em cliente, prompt, parser e schemas. O

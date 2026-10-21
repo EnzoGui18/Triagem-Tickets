@@ -64,6 +64,8 @@ async def worker_session_factory(
 async def _enqueue_job(
     session_factory: async_sessionmaker[AsyncSession],
     external_id: str,
+    *,
+    queue_priority: int = 10,
 ) -> tuple[UUID, UUID]:
     async with session_factory() as session, session.begin():
         database_now = await session.scalar(select(func.clock_timestamp()))
@@ -85,7 +87,7 @@ async def _enqueue_job(
         job = ProcessingJob(
             ticket_id=ticket.id,
             job_type=JobType.CLASSIFICATION,
-            queue_priority=10,
+            queue_priority=queue_priority,
             available_at=database_now - timedelta(minutes=1),
         )
         session.add(job)
@@ -170,6 +172,38 @@ async def test_concurrent_workers_complete_each_job_once(
     assert all(job.classification_id is not None for job in jobs)
     assert all(job.attempt_count == 1 for job in jobs)
     assert classification_counts == dict.fromkeys(ticket_ids, 1)
+
+
+async def test_worker_reserves_elevated_priority_first_and_keeps_fifo_within_priority(
+    worker_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    first_normal_job_id, _ = await _enqueue_job(
+        worker_session_factory,
+        f"worker-priority-normal-first-{uuid4()}",
+        queue_priority=0,
+    )
+    second_normal_job_id, _ = await _enqueue_job(
+        worker_session_factory,
+        f"worker-priority-normal-second-{uuid4()}",
+        queue_priority=0,
+    )
+    elevated_job_id, _ = await _enqueue_job(
+        worker_session_factory,
+        f"worker-priority-elevated-{uuid4()}",
+        queue_priority=100,
+    )
+    worker = _worker(worker_session_factory, "worker-priority-order")
+
+    elevated = await worker.reserve_next_job()
+    first_normal = await worker.reserve_next_job()
+    second_normal = await worker.reserve_next_job()
+
+    assert elevated is not None
+    assert elevated.id == elevated_job_id
+    assert first_normal is not None
+    assert first_normal.id == first_normal_job_id
+    assert second_normal is not None
+    assert second_normal.id == second_normal_job_id
 
 
 async def test_expired_worker_lease_is_recovered_after_crash(

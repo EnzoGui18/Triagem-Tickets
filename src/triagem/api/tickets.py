@@ -92,6 +92,7 @@ async def create_ticket(
         external_id=ticket.external_id,
         ticket_id=ticket.id,
         job_id=ingestion.job_id,
+        queue_priority=ingestion.queue_priority,
     )
 
     return TicketAcceptedResponse(

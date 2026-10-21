@@ -64,6 +64,12 @@ curta, seleciona um job disponível com `FOR UPDATE SKIP LOCKED`, altera seu est
 `processing`, incrementa a tentativa e grava `locked_at` e `locked_by`. A classificação ocorre
 depois do commit da reserva, sem manter lock de linha durante o processamento.
 
+A seleção ordena primeiro por `queue_priority DESC` e depois pelos campos temporais e pelo UUID.
+Na ingestão, uma função pura de alta sensibilidade atribui `100` a sinais fortes de fraude,
+comprometimento de conta ou segurança, cobrança suspeita e urgência explícita; os demais jobs
+recebem `0`. Essa pontuação é somente metadado de scheduling. Ela não produz categoria,
+prioridade de negócio, sentimento ou alerta, que continuam exclusivos do resultado do LLM.
+
 Depois da reserva, o worker chama o `llm-sim` por meio do rate limiter global, extrai e valida a
 resposta e persiste a classificação. A classificação, o vínculo
 `processing_jobs.classification_id`, a conclusão do job e a atualização do ticket são confirmados
@@ -111,6 +117,10 @@ somente após o commit e não chama Redis, LLM ou plantão.
 A inserção usa `ON CONFLICT` sobre `uq_tickets_external_id`. Apenas a transação vencedora cria
 o job; retries leem o registro já confirmado e comparam o hash. Hash diferente resulta em HTTP
 409.
+
+O mesmo fluxo calcula a prioridade inicial da fila a partir apenas de assunto e mensagem. O valor
+é persistido junto do job e incluído como campo controlado no log de ingestão, sem registrar o
+conteúdo usado pela heurística.
 
 ## Consultas de tickets
 

@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from triagem.models import JobType, ProcessingJob, Ticket
+from triagem.scheduling import classification_queue_priority
 from triagem.schemas import TicketPayload
 
 
@@ -22,6 +23,7 @@ class TicketPayloadConflictError(Exception):
 class IngestionResult:
     ticket: Ticket
     job_id: UUID
+    queue_priority: int
     duplicate: bool
 
 
@@ -68,8 +70,8 @@ async def ingest_ticket(session: AsyncSession, payload: TicketPayload) -> Ingest
                 raise RuntimeError("conflicting ticket was not found")
             if ticket.payload_hash != payload_hash:
                 raise TicketPayloadConflictError
-            existing_job_id = await session.scalar(
-                select(ProcessingJob.id)
+            existing_job = await session.scalar(
+                select(ProcessingJob)
                 .where(
                     ProcessingJob.ticket_id == ticket.id,
                     ProcessingJob.job_type == JobType.CLASSIFICATION,
@@ -77,16 +79,30 @@ async def ingest_ticket(session: AsyncSession, payload: TicketPayload) -> Ingest
                 .order_by(ProcessingJob.created_at, ProcessingJob.id)
                 .limit(1)
             )
-            if existing_job_id is None:
+            if existing_job is None:
                 raise RuntimeError("accepted ticket has no classification job")
-            return IngestionResult(ticket=ticket, job_id=existing_job_id, duplicate=True)
+            return IngestionResult(
+                ticket=ticket,
+                job_id=existing_job.id,
+                queue_priority=existing_job.queue_priority,
+                duplicate=True,
+            )
 
+        queue_priority = classification_queue_priority(
+            subject=payload.subject,
+            message=payload.message,
+        )
         job = ProcessingJob(
             ticket_id=ticket.id,
             job_type=JobType.CLASSIFICATION,
-            queue_priority=0,
+            queue_priority=queue_priority,
         )
         session.add(job)
         await session.flush()
 
-    return IngestionResult(ticket=ticket, job_id=job.id, duplicate=False)
+    return IngestionResult(
+        ticket=ticket,
+        job_id=job.id,
+        queue_priority=queue_priority,
+        duplicate=False,
+    )
