@@ -588,7 +588,7 @@ Confirme a recuperação por `/health/ready`, `GET /tickets/{external_id}` e
 Os simuladores introduzem latência, erros e outputs inválidos aleatoriamente. Os números abaixo
 são resultados observados, não estimativas de produção.
 
-### 20.1 Revisão de entrega — 2026-10-20
+### 20.1 Revisão de entrega 
 
 Esta medição antecede a Fase Final 1; os cinco HTTP 422 abaixo refletem o antigo limite de
 mensagem e são preservados apenas como resultado histórico, não como comportamento atual.
@@ -607,7 +607,7 @@ Não havia ticket sem job nem ticket com jobs duplicados. Foram entregues 47 ale
 A suíte no clone recém-construído terminou com 112 testes aprovados e um warning de depreciação
 Starlette/httpx. `alembic check` não detectou operações pendentes.
 
-### 20.2 Performance de ingestão — Fase 16
+### 20.2 Performance de ingestão 
 
 Medição com 500 entradas, banco vazio e três workers:
 
@@ -635,7 +635,7 @@ Nos primeiros 116 jobs concluídos:
 O processamento total p95 caiu 31,5% e o p99 caiu 31,8% nessa amostra. Houve 16 esperas locais no
 rate limiter e zero respostas 429 do provedor.
 
-### 20.3 Chaos/E2E — Fase 15
+### 20.3 Chaos/E2E 
 
 Foram exercitados: cargas de 20 e 500, outage de 60 segundos do LLM, workers desligados, restart
 do Redis, duplicata, conflito, payload inválido e reinício da API. Os 495 tickets únicos aceitos
