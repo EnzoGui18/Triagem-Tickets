@@ -95,6 +95,8 @@ def test_metrics_endpoint_exposes_prioritized_counters(client: TestClient) -> No
         b"llm_request_duration_seconds",
         b"classification_duration_seconds",
         b"alert_request_duration_seconds",
+        b"urgent_alert_end_to_end_seconds",
+        b"urgent_alert_sla_violations_total",
         b"ticket_processing_duration_seconds",
         b"llm_rate_limit_wait_total",
         b"database_pool_capacity",

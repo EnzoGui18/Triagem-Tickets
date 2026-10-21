@@ -26,7 +26,14 @@ from triagem.alerting import (
 )
 from triagem.core.config import get_settings
 from triagem.core.database import async_session_factory, engine
-from triagem.core.metrics import ALERTS_DELIVERED, ALERTS_RETRY, start_worker_metrics_server
+from triagem.core.metrics import (
+    ALERTS_DELIVERED,
+    ALERTS_RETRY,
+    URGENT_ALERT_END_TO_END,
+    URGENT_ALERT_SLA_THRESHOLD_SECONDS,
+    URGENT_ALERT_SLA_VIOLATIONS,
+    start_worker_metrics_server,
+)
 from triagem.core.structured_logging import configure_structured_logging, log_event
 from triagem.models import (
     AlertDelivery,
@@ -34,6 +41,7 @@ from triagem.models import (
     JobStatus,
     JobType,
     ProcessingJob,
+    Ticket,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,6 +69,11 @@ class RecordedAlertFailure:
     status: JobStatus
     error_code: str
     next_retry_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedAlert:
+    end_to_end_seconds: float
 
 
 def _failure_policy(error: Exception) -> AlertFailurePolicy:
@@ -206,8 +219,11 @@ class AlertWorker:
             return True
 
         completed = await self._complete_job(reserved_job, result)
-        if completed:
+        if completed is not None:
             ALERTS_DELIVERED.inc()
+            URGENT_ALERT_END_TO_END.observe(completed.end_to_end_seconds)
+            if completed.end_to_end_seconds > URGENT_ALERT_SLA_THRESHOLD_SECONDS:
+                URGENT_ALERT_SLA_VIOLATIONS.inc()
             log_event(
                 logger,
                 logging.INFO,
@@ -290,18 +306,21 @@ class AlertWorker:
         self,
         reserved_job: ReservedAlertJob,
         result: AlertProviderResult,
-    ) -> bool:
+    ) -> CompletedAlert | None:
         async with self._session_factory() as session, session.begin():
             job = await self._owned_job(session, reserved_job)
             if job is None:
-                return False
+                return None
             delivery = await session.get(
                 AlertDelivery,
                 reserved_job.alert_delivery_id,
                 with_for_update=True,
             )
             if delivery is None:
-                return False
+                return None
+            ticket = await session.get(Ticket, reserved_job.ticket_id)
+            if ticket is None:  # pragma: no cover - protected by the job foreign key
+                raise RuntimeError("alert job ticket was not found")
 
             now = await self._database_now(session)
             delivery.status = AlertDeliveryStatus.DELIVERED
@@ -321,7 +340,9 @@ class AlertWorker:
             job.last_error_message = None
             job.completed_at = now
             job.updated_at = now
-            return True
+            return CompletedAlert(
+                end_to_end_seconds=(now - ticket.received_at).total_seconds()
+            )
 
     async def _record_failure(
         self,

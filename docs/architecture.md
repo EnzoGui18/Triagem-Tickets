@@ -155,6 +155,12 @@ antes do HTTP e usa lease e fencing token da mesma forma que o worker de classif
 conclui o job; 503, timeout, falha de rede e outros 5xx geram uma nova tentativa agendada; 422 e
 outros 4xx são permanentes. Falhas do plantão nunca alteram nem recriam a classificação.
 
+Depois de confirmar localmente uma entrega aceita, o worker observa
+`urgent_alert_end_to_end_seconds` como a diferença entre `alert_deliveries.delivered_at` e
+`tickets.received_at`. Durações acima do threshold explícito de 60 segundos incrementam
+`urgent_alert_sla_violations_total`. Essa medição inclui fila, classificação, criação e retries do
+alerta; `alert_request_duration_seconds` continua medindo somente a chamada HTTP ao plantão.
+
 Cada tentativa ocupa uma linha numerada em `alert_deliveries`. O contador global e o último erro
 ficam também no `processing_job`; status HTTP, erro, id retornado pelo plantão, início da tentativa,
 próximo retry e entrega ficam na linha da tentativa. O primeiro e o último horário são obtidos de
@@ -177,7 +183,8 @@ expõe métricas Prometheus em `/metrics`; cada worker inicia um exporter própr
 rede interna. Contadores de custo são telemetria aproximada do protocolo Prometheus; os valores
 financeiros autoritativos continuam como `NUMERIC` calculado com `Decimal` no PostgreSQL.
 Histogramas cobrem ingestão, espera de fila, chamadas ao LLM, tentativas de classificação,
-chamadas ao plantão e tempo total. Gauges do pool SQLAlchemy são locais a cada processo.
+chamadas ao plantão, SLA urgente end-to-end e tempo total. Gauges do pool SQLAlchemy são locais a
+cada processo.
 
 O Compose usa três classification workers por padrão, cada um ainda reservando um job por vez.
 Todos compartilham o rate limiter Redis de 5 novas chamadas/s. A API mantém pool PostgreSQL com

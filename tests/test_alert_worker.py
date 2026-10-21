@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import httpx
@@ -94,9 +95,10 @@ async def _seed_alert_job(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     max_attempts: int = 3,
+    received_at: datetime | None = None,
 ) -> tuple[UUID, UUID, UUID]:
     async with session_factory() as session, session.begin():
-        detected_at = datetime.now(UTC)
+        detected_at = received_at or datetime.now(UTC)
         identifier = uuid4()
         ticket = Ticket(
             external_id=f"alert-worker-{identifier}",
@@ -107,6 +109,7 @@ async def _seed_alert_job(
             message="O pedido está muito atrasado.",
             channel="web",
             source_created_at=detected_at,
+            received_at=detected_at,
             payload_hash="c" * 64,
         )
         version = ClassifierVersion(
@@ -286,6 +289,50 @@ async def test_202_marks_delivery_and_job_completed(
     assert delivery.provider_request_id == "provider-alert-123"
     assert delivery.attempted_at is not None
     assert delivery.delivered_at is not None
+
+
+@pytest.mark.parametrize(
+    ("elapsed_seconds", "expected_sla_violations"),
+    [(42.0, 0), (65.0, 1)],
+)
+async def test_202_observes_urgent_alert_end_to_end_sla_with_controlled_timestamps(
+    alert_session_factory: async_sessionmaker[AsyncSession],
+    elapsed_seconds: float,
+    expected_sla_violations: int,
+) -> None:
+    received_at = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
+    delivered_at = received_at + timedelta(seconds=elapsed_seconds)
+    _, _, classification_id = await _seed_alert_job(
+        alert_session_factory,
+        received_at=received_at,
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(202))
+    ) as http_client:
+        worker = _worker(alert_session_factory, http_client, f"alert-sla-{uuid4()}")
+
+        async def controlled_database_now(_: AsyncSession) -> datetime:
+            return delivered_at
+
+        with (
+            patch.object(worker, "_database_now", controlled_database_now),
+            patch("triagem.workers.alert.URGENT_ALERT_END_TO_END") as histogram,
+            patch("triagem.workers.alert.URGENT_ALERT_SLA_VIOLATIONS") as violations,
+        ):
+            assert await worker.run_once() is True
+
+    async with alert_session_factory() as session:
+        delivery = await session.scalar(
+            select(AlertDelivery).where(
+                AlertDelivery.classification_id == classification_id
+            )
+        )
+
+    assert delivery is not None
+    assert delivery.delivered_at == delivered_at
+    histogram.observe.assert_called_once_with(elapsed_seconds)
+    assert violations.inc.call_count == expected_sla_violations
 
 
 async def test_503_retries_then_delivers_without_reclassifying(

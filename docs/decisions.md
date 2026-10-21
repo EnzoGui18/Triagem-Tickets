@@ -170,6 +170,11 @@ A revisão inicial do Alembic é deliberadamente vazia: ela estabelece o baselin
   não é prometido.
 - Falhas e retries de alerta operam apenas no job `alert_delivery`; nunca criam nova classificação
   nem retornam o job de classificação para processamento.
+- `alert_request_duration_seconds` mede exclusivamente a latência HTTP do plantão.
+  `urgent_alert_end_to_end_seconds` mede o requisito de negócio completo, de
+  `tickets.received_at` a `alert_deliveries.delivered_at`, somente após a confirmação local da
+  entrega. Durações estritamente maiores que a constante de 60 segundos incrementam
+  `urgent_alert_sla_violations_total`.
 
 ## Auditoria operacional e timeline
 

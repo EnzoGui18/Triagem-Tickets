@@ -51,6 +51,11 @@ LLM_COST_USD = Counter(
 )
 ALERTS_DELIVERED = Counter("alerts_delivered_total", "Urgent alerts accepted by plantao.")
 ALERTS_RETRY = Counter("alerts_retry_total", "Urgent alert deliveries scheduled for retry.")
+URGENT_ALERT_SLA_THRESHOLD_SECONDS = 60.0
+URGENT_ALERT_SLA_VIOLATIONS = Counter(
+    "urgent_alert_sla_violations_total",
+    "Urgent alerts delivered more than 60 seconds after ticket receipt.",
+)
 INGESTION_DURATION = Histogram(
     "ingestion_duration_seconds",
     "End-to-end duration of POST /tickets, including validation and persistence.",
@@ -75,6 +80,11 @@ ALERT_REQUEST_DURATION = Histogram(
     "alert_request_duration_seconds",
     "Duration of HTTP requests to the on-call provider.",
     buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10),
+)
+URGENT_ALERT_END_TO_END = Histogram(
+    "urgent_alert_end_to_end_seconds",
+    "Time from durable ticket receipt until the urgent alert is delivered.",
+    buckets=(1, 5, 10, 15, 30, 45, 60, 90, 120, 300, 600),
 )
 TOTAL_PROCESSING_DURATION = Histogram(
     "ticket_processing_duration_seconds",

@@ -360,7 +360,11 @@ Métricas principais:
 - classificações concluídas, em retry, falhas e profundidade da fila;
 - chamadas, erros, 429, tokens, custo e esperas locais do rate limiter;
 - alertas entregues e em retry;
-- histogramas de ingestão, fila, LLM, classificação, alerta e processamento total;
+- `alert_request_duration_seconds`, que mede somente a chamada HTTP ao plantão;
+- `urgent_alert_end_to_end_seconds`, que mede de `tickets.received_at` até
+  `alert_deliveries.delivered_at`, e `urgent_alert_sla_violations_total`, incrementado quando essa
+  duração ultrapassa 60 segundos;
+- histogramas de ingestão, fila, LLM, classificação e processamento total;
 - capacidade, conexões abertas e conexões em uso no pool PostgreSQL.
 
 A API expõe `/metrics`. Cada worker possui registry e exporter próprios na porta interna definida
