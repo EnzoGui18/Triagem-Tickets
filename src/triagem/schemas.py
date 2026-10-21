@@ -115,6 +115,48 @@ class TicketClassificationResponse(BaseModel):
     created_at: datetime = Field(serialization_alias="criado_em")
 
 
+class ClassificationUsageResponse(BaseModel):
+    input_tokens: int
+    output_tokens: int
+
+
+class ClassificationCostResponse(BaseModel):
+    input: str = Field(serialization_alias="entrada")
+    output: str = Field(serialization_alias="saida")
+    total: str
+
+
+class ClassifierIdentityResponse(BaseModel):
+    provider: str
+    model: str
+    version: str
+
+
+class TicketClassificationDetailResponse(TicketClassificationResponse):
+    usage: ClassificationUsageResponse | None = None
+    cost_usd: ClassificationCostResponse | None = Field(
+        default=None,
+        serialization_alias="custo_usd",
+    )
+
+
+class TicketClassificationHistoryItemResponse(TicketClassificationDetailResponse):
+    classifier: ClassifierIdentityResponse
+
+
+class TicketClassificationHistoryResponse(BaseModel):
+    external_id: str
+    classifications: list[TicketClassificationHistoryItemResponse] = Field(
+        serialization_alias="classificacoes"
+    )
+
+
+class TicketReclassificationAcceptedResponse(BaseModel):
+    external_id: str
+    job_id: UUID
+    status: JobStatus
+
+
 class TicketProcessingResponse(BaseModel):
     job_id: UUID
     status: JobStatus
@@ -133,7 +175,7 @@ class TicketDetailResponse(BaseModel):
     source_created_at: datetime = Field(serialization_alias="criado_em")
     received_at: datetime = Field(serialization_alias="recebido_em")
     status: TicketStatus
-    current_classification: TicketClassificationResponse | None = Field(
+    current_classification: TicketClassificationDetailResponse | None = Field(
         serialization_alias="classificacao_atual"
     )
     processing: TicketProcessingResponse | None = Field(serialization_alias="processamento")

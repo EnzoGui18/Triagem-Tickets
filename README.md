@@ -20,6 +20,8 @@ Endpoints:
 | `POST /tickets` | Valida e persiste ticket e job; retorna HTTP 202 |
 | `GET /tickets/{external_id}` | Retorna ticket, classificação atual e processamento pendente |
 | `GET /tickets` | Lista com filtros por categoria, prioridade e período |
+| `GET /tickets/{external_id}/classifications` | Lista o histórico versionado de classificações |
+| `POST /tickets/{external_id}/reclassify` | Enfileira uma nova classificação; retorna HTTP 202 |
 | `GET /tickets/{external_id}/timeline` | Reconstrói o histórico operacional do ticket |
 
 ## 2. Requisitos
@@ -310,6 +312,11 @@ Reutilizar a mesma identidade com prompt ou schema diferente falha antes da cham
 reclassificação cria novo job e nova linha em `classifications`; resultados anteriores nunca são
 sobrescritos.
 
+Classificações são append-only; reprocessar nunca sobrescreve resultados históricos. O endpoint de
+reclassificação apenas cria um job durável e retorna HTTP 202: a versão usada será a versão atual
+carregada pelo worker. Se já existir um job de classificação em estado processável, a API retorna
+HTTP 409 para evitar reclassificações concorrentes acidentais.
+
 ## 14. Custos
 
 Os cálculos usam `Decimal` e são persistidos como `NUMERIC(20, 8)`:
@@ -323,6 +330,9 @@ total_cost  = input_cost + output_cost
 Constraints garantem que os três valores estejam todos presentes ou todos ausentes, sejam
 não negativos e que o total seja a soma exata. O contador Prometheus é aproximado por exigência
 do protocolo; o valor financeiro autoritativo é o `Decimal` do PostgreSQL.
+
+As consultas HTTP representam custos como strings com oito casas decimais. Assim, a API não
+converte valores financeiros para ponto flutuante e preserva a precisão armazenada.
 
 ## 15. Segurança
 
@@ -459,6 +469,9 @@ De volta ao projeto:
 ```bash
 curl --fail http://localhost:8000/tickets/ENTREGA-SMOKE-001
 curl --fail http://localhost:8000/tickets/ENTREGA-SMOKE-001/timeline
+curl --fail http://localhost:8000/tickets/ATD-001/classifications
+curl --fail -X POST \
+  http://localhost:8000/tickets/ATD-001/reclassify
 curl --fail "http://localhost:8000/tickets?page=1&page_size=20"
 curl --fail "http://localhost:8000/tickets?categoria=entrega&prioridade=alta&page=1&page_size=20"
 curl --fail http://localhost:8082/alertas

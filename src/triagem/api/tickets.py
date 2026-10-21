@@ -6,11 +6,19 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from triagem.core.config import get_settings
 from triagem.core.database import get_session
 from triagem.core.metrics import TICKETS_DUPLICATE, TICKETS_RECEIVED
 from triagem.core.structured_logging import log_event
+from triagem.models import Classification
 from triagem.schemas import (
+    ClassificationCostResponse,
+    ClassificationUsageResponse,
+    ClassifierIdentityResponse,
     TicketAcceptedResponse,
+    TicketClassificationDetailResponse,
+    TicketClassificationHistoryItemResponse,
+    TicketClassificationHistoryResponse,
     TicketClassificationResponse,
     TicketCustomerResponse,
     TicketDetailResponse,
@@ -19,10 +27,22 @@ from triagem.schemas import (
     TicketListResponse,
     TicketPayload,
     TicketProcessingResponse,
+    TicketReclassificationAcceptedResponse,
     TicketTimelineResponse,
 )
 from triagem.ticket_ingestion import TicketPayloadConflictError, ingest_ticket
-from triagem.ticket_queries import TicketQueryRecord, get_ticket_by_external_id, list_tickets
+from triagem.ticket_queries import (
+    ClassificationHistoryRecord,
+    TicketQueryRecord,
+    get_ticket_by_external_id,
+    get_ticket_classification_history,
+    list_tickets,
+)
+from triagem.ticket_reclassification import (
+    ActiveClassificationJobError,
+    TicketNotFoundError,
+    enqueue_ticket_reclassification,
+)
 from triagem.ticket_timeline import get_ticket_timeline
 
 router = APIRouter(prefix="/tickets", tags=["tickets"])
@@ -41,6 +61,73 @@ def _classification_response(
         priority=classification.priority,
         sentiment=classification.sentiment,
         suggested_response=classification.suggested_response,
+        created_at=classification.created_at,
+    )
+
+
+def _classification_usage(
+    classification: Classification,
+) -> ClassificationUsageResponse | None:
+    if classification.input_tokens is None or classification.output_tokens is None:
+        return None
+    return ClassificationUsageResponse(
+        input_tokens=classification.input_tokens,
+        output_tokens=classification.output_tokens,
+    )
+
+
+def _classification_cost(
+    classification: Classification,
+) -> ClassificationCostResponse | None:
+    if (
+        classification.input_cost is None
+        or classification.output_cost is None
+        or classification.total_cost is None
+    ):
+        return None
+    return ClassificationCostResponse(
+        input=format(classification.input_cost, ".8f"),
+        output=format(classification.output_cost, ".8f"),
+        total=format(classification.total_cost, ".8f"),
+    )
+
+
+def _classification_detail_response(
+    record: TicketQueryRecord,
+) -> TicketClassificationDetailResponse | None:
+    classification = record.classification
+    if classification is None:
+        return None
+    return TicketClassificationDetailResponse(
+        id=classification.id,
+        category=classification.category,
+        priority=classification.priority,
+        sentiment=classification.sentiment,
+        suggested_response=classification.suggested_response,
+        created_at=classification.created_at,
+        usage=_classification_usage(classification),
+        cost_usd=_classification_cost(classification),
+    )
+
+
+def _classification_history_item_response(
+    record: ClassificationHistoryRecord,
+) -> TicketClassificationHistoryItemResponse:
+    classification = record.classification
+    classifier_version = record.classifier_version
+    return TicketClassificationHistoryItemResponse(
+        id=classification.id,
+        classifier=ClassifierIdentityResponse(
+            provider=classifier_version.provider,
+            model=classifier_version.model_name,
+            version=classifier_version.version,
+        ),
+        category=classification.category,
+        priority=classification.priority,
+        sentiment=classification.sentiment,
+        suggested_response=classification.suggested_response,
+        usage=_classification_usage(classification),
+        cost_usd=_classification_cost(classification),
         created_at=classification.created_at,
     )
 
@@ -161,8 +248,68 @@ async def get_ticket(
         source_created_at=ticket.source_created_at,
         received_at=ticket.received_at,
         status=ticket.status,
-        current_classification=_classification_response(record),
+        current_classification=_classification_detail_response(record),
         processing=processing,
+    )
+
+
+@router.get(
+    "/{external_id}/classifications",
+    response_model=TicketClassificationHistoryResponse,
+)
+async def get_classifications(
+    external_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> TicketClassificationHistoryResponse:
+    history = await get_ticket_classification_history(session, external_id)
+    if history is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ticket não encontrado")
+    return TicketClassificationHistoryResponse(
+        external_id=history.ticket.external_id,
+        classifications=[
+            _classification_history_item_response(item) for item in history.items
+        ],
+    )
+
+
+@router.post(
+    "/{external_id}/reclassify",
+    response_model=TicketReclassificationAcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def reclassify_ticket(
+    external_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> TicketReclassificationAcceptedResponse:
+    try:
+        result = await enqueue_ticket_reclassification(
+            session,
+            external_id=external_id,
+            max_attempts=get_settings().classification_max_attempts,
+        )
+    except TicketNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="ticket não encontrado",
+        ) from error
+    except ActiveClassificationJobError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="ticket já possui job de classificação ativo",
+        ) from error
+
+    log_event(
+        logger,
+        logging.INFO,
+        "ticket_reclassification_queued",
+        external_id=result.external_id,
+        job_id=result.job_id,
+        queue_priority=result.queue_priority,
+    )
+    return TicketReclassificationAcceptedResponse(
+        external_id=result.external_id,
+        job_id=result.job_id,
+        status=result.status,
     )
 
 

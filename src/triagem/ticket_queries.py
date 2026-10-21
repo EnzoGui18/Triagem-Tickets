@@ -10,6 +10,7 @@ from sqlalchemy.orm import aliased
 from triagem.models import (
     Classification,
     ClassificationCategory,
+    ClassifierVersion,
     JobStatus,
     JobType,
     ProcessingJob,
@@ -29,6 +30,18 @@ class TicketQueryRecord:
 class TicketPage:
     items: list[TicketQueryRecord]
     total: int
+
+
+@dataclass(frozen=True, slots=True)
+class ClassificationHistoryRecord:
+    classification: Classification
+    classifier_version: ClassifierVersion
+
+
+@dataclass(frozen=True, slots=True)
+class TicketClassificationHistory:
+    ticket: Ticket
+    items: list[ClassificationHistoryRecord]
 
 
 def _current_classification_query() -> tuple[
@@ -95,6 +108,35 @@ async def get_ticket_by_external_id(
         ticket=ticket,
         classification=classification,
         processing_job=processing_job,
+    )
+
+
+async def get_ticket_classification_history(
+    session: AsyncSession,
+    external_id: str,
+) -> TicketClassificationHistory | None:
+    ticket = await session.scalar(select(Ticket).where(Ticket.external_id == external_id))
+    if ticket is None:
+        return None
+
+    result = await session.execute(
+        select(Classification, ClassifierVersion)
+        .join(
+            ClassifierVersion,
+            ClassifierVersion.id == Classification.classifier_version_id,
+        )
+        .where(Classification.ticket_id == ticket.id)
+        .order_by(Classification.created_at, Classification.id)
+    )
+    return TicketClassificationHistory(
+        ticket=ticket,
+        items=[
+            ClassificationHistoryRecord(
+                classification=classification,
+                classifier_version=classifier_version,
+            )
+            for classification, classifier_version in result.all()
+        ],
     )
 
 

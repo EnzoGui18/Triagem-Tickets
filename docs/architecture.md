@@ -137,7 +137,18 @@ conteúdo usado pela heurística.
 `GET /tickets/{external_id}` consulta o ticket pela identidade externa e retorna a classificação
 mais recente, ordenada deterministicamente por `created_at` e `id`. Quando existe um job de
 classificação em `pending`, `processing` ou `retry_scheduled`, seu estado também acompanha a
-resposta. Jobs concluídos ou falhos não são apresentados como processamento pendente.
+resposta. Usage e custos da classificação atual são expostos sem converter valores monetários para
+`float`. Jobs concluídos ou falhos não são apresentados como processamento pendente.
+
+`GET /tickets/{external_id}/classifications` projeta todo o histórico append-only em ordem
+cronológica determinística por `created_at` e `id`, incluindo a identidade imutável do classificador,
+usage e custos em strings decimais. Dados históricos anteriores à coleta desses campos permanecem
+explicitamente nulos.
+
+`POST /tickets/{external_id}/reclassify` bloqueia a linha do ticket e cria somente um novo job
+durável; não chama o LLM nem altera classificações existentes. Um job ativo em `pending`,
+`processing` ou `retry_scheduled` causa HTTP 409. O worker que reservar o novo job usa sua versão
+atual do classificador, permitindo comparar resultados de versões diferentes no histórico.
 
 `GET /tickets` usa uma subconsulta com função de janela para associar cada ticket somente à sua
 classificação atual. Categoria e prioridade filtram essa classificação; o período filtra

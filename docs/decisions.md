@@ -51,6 +51,11 @@ A revisão inicial do Alembic é deliberadamente vazia: ela estabelece o baselin
   sem conclusão ou conclusão sem histórico.
 - Uma reclassificação cria uma nova linha e um novo vínculo com `classifier_versions`; a linha
   anterior nunca é atualizada ou reutilizada como resultado do novo job.
+- A API de reclassificação serializa solicitações concorrentes com lock na linha do ticket e retorna
+  HTTP 409 quando já existe job de classificação ativo. O request apenas persiste o novo job; a
+  identidade da versão é decidida pelo worker no processamento.
+- O histórico de classificações é ordenado por `created_at` e `id`. Usage pode ser nulo para dados
+  legados, e custos são serializados como strings com oito casas para não perder precisão.
 - A combinação de provedor, modelo e versão identifica uma definição imutável. Reutilizar essa
   identidade com prompt ou schema diferente falha antes da chamada ao LLM, em vez de associar a
   nova classificação a metadados incorretos.
