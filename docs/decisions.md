@@ -103,6 +103,9 @@ A revisão inicial do Alembic é deliberadamente vazia: ela estabelece o baselin
 
 - Retries não mantêm o worker bloqueado: o job volta para `retry_scheduled` com novo
   `available_at`. `attempt_count` é incrementado na reserva e `max_attempts` limita toda execução.
+- Novos jobs de classificação e alerta materializam, respectivamente,
+  `CLASSIFICATION_MAX_ATTEMPTS` e `ALERT_MAX_ATTEMPTS`, ambos com padrão oito. Jobs existentes não
+  são atualizados quando a configuração muda.
 - 429 respeita `Retry-After`. Erros 500/503, timeout, rede, rate limiter indisponível e saída
   inválida são transitórios. O atraso combina backoff exponencial, jitter de até 25% e teto
   configurado por `CLASSIFICATION_WORKER_MAX_RETRY_DELAY_SECONDS`.
@@ -113,6 +116,18 @@ A revisão inicial do Alembic é deliberadamente vazia: ela estabelece o baselin
   sensíveis para logs e campos de erro.
 - A saída bruta é preservada somente quando foi extraída e validada com sucesso. Tentativas com
   saída inválida não criam linha parcial em `classifications`.
+
+## Recuperação operacional de classificações falhas
+
+- O comando `python -m triagem.tools.requeue_failed` aceita exatamente um `--external-id` ou
+  `--all`; nenhuma API administrativa pública foi adicionada.
+- O requeue cria um novo job em vez de zerar `attempt_count` no job falho. Isso preserva erros,
+  leases finais e `classification_attempts` anteriores e evita reutilizar números protegidos por
+  `(processing_job_id, attempt_number)`.
+- O novo job começa em `pending`, sem lease ou erro, mantém a prioridade de fila anterior e recebe
+  o budget atual de classificação. O ticket volta a `received` até a próxima reserva.
+- Ticket e job mais recente são bloqueados e revalidados na transação. Se houver job posterior
+  concluído ou processável, nenhum novo job é criado, tornando repetições do comando seguras.
 
 ## Circuit breaker do provedor de IA
 

@@ -27,12 +27,14 @@ class Settings(BaseSettings):
     llm_max_concurrency: PositiveInt = 5
     llm_circuit_breaker_failure_threshold: PositiveInt = 2
     llm_circuit_breaker_recovery_timeout_seconds: PositiveFloat = 10.0
+    classification_max_attempts: PositiveInt = 8
     classification_worker_lease_seconds: float = 60.0
     classification_worker_retry_delay_seconds: float = 5.0
     classification_worker_max_retry_delay_seconds: float = 300.0
     classification_worker_poll_interval_seconds: float = 0.5
     plantao_base_url: str = "http://plantao:8080"
     plantao_timeout_seconds: float = 10.0
+    alert_max_attempts: PositiveInt = 8
     alert_worker_lease_seconds: float = 30.0
     alert_worker_retry_delay_seconds: float = 5.0
     alert_worker_max_retry_delay_seconds: float = 300.0

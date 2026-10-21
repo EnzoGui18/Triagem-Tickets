@@ -282,6 +282,10 @@ O atraso usa backoff exponencial com jitter de até 25% e teto configurável. `a
 `max_attempts` impedem loops infinitos. Erros são persistidos com códigos e mensagens operacionais
 sanitizadas.
 
+Novos jobs usam budgets configuráveis: `CLASSIFICATION_MAX_ATTEMPTS=8` para classificação e
+`ALERT_MAX_ATTEMPTS=8` para entrega. Alterar essas variáveis afeta apenas jobs criados depois da
+mudança; jobs já persistidos mantêm seu budget original.
+
 ## 12. Circuit breaker
 
 O circuit breaker do LLM é distribuído pelo Redis e possui estados `closed`, `open` e
@@ -485,6 +489,26 @@ uvicorn triagem.main:app --reload
 ```
 
 No PowerShell, a ativação é `.\.venv\Scripts\Activate.ps1`.
+
+### 17.7 Recuperação operacional de jobs falhos
+
+O comando abaixo cria um novo job de classificação para o ticket quando seu job mais recente está
+em `failed`:
+
+```bash
+python -m triagem.tools.requeue_failed --external-id ATD-2026001
+```
+
+Com a aplicação em Docker, use o mesmo comando no serviço da API:
+
+```bash
+docker compose run --rm api python -m triagem.tools.requeue_failed --external-id ATD-2026001
+```
+
+Para recuperar todos os tickets elegíveis, substitua o filtro por `--all`. O job falho e suas
+tentativas permanecem intactos para auditoria; o novo job recebe um budget independente definido
+por `CLASSIFICATION_MAX_ATTEMPTS`. Jobs concluídos ou que já possuem processamento posterior não
+são reabertos. O mecanismo não oferece retry infinito.
 
 ## 18. Como testar
 

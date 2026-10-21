@@ -195,6 +195,7 @@ class ClassificationWorker:
         worker_id: str,
         lease_duration: timedelta,
         retry_delay: timedelta,
+        alert_max_attempts: int | None = None,
         max_retry_delay: timedelta = timedelta(minutes=5),
         jitter_source: Callable[[float, float], float] = random.uniform,
         poll_interval_seconds: float = 1.0,
@@ -205,6 +206,13 @@ class ClassificationWorker:
             raise ValueError("lease_duration must be positive")
         if retry_delay < timedelta(0):
             raise ValueError("retry_delay cannot be negative")
+        resolved_alert_max_attempts = (
+            get_settings().alert_max_attempts
+            if alert_max_attempts is None
+            else alert_max_attempts
+        )
+        if resolved_alert_max_attempts <= 0:
+            raise ValueError("alert_max_attempts must be positive")
         if max_retry_delay < retry_delay:
             raise ValueError("max_retry_delay cannot be shorter than retry_delay")
         if poll_interval_seconds <= 0:
@@ -215,6 +223,7 @@ class ClassificationWorker:
         self.worker_id = worker_id
         self.lease_duration = lease_duration
         self.retry_delay = retry_delay
+        self.alert_max_attempts = resolved_alert_max_attempts
         self.max_retry_delay = max_retry_delay
         self._jitter_source = jitter_source
         self.poll_interval_seconds = poll_interval_seconds
@@ -545,6 +554,7 @@ class ClassificationWorker:
                             classification_id=classification.id,
                             job_type=JobType.ALERT_DELIVERY,
                             queue_priority=100,
+                            max_attempts=self.alert_max_attempts,
                             available_at=now,
                         ),
                     ]
@@ -754,6 +764,7 @@ async def _run_worker() -> None:
                 worker_id=_worker_id(),
                 lease_duration=timedelta(seconds=settings.classification_worker_lease_seconds),
                 retry_delay=timedelta(seconds=settings.classification_worker_retry_delay_seconds),
+                alert_max_attempts=settings.alert_max_attempts,
                 max_retry_delay=timedelta(
                     seconds=settings.classification_worker_max_retry_delay_seconds
                 ),

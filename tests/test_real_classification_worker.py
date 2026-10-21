@@ -71,7 +71,7 @@ async def real_worker_session_factory(
 async def _enqueue_job(
     session_factory: async_sessionmaker[AsyncSession],
     *,
-    max_attempts: int = 3,
+    max_attempts: int = 8,
     queue_priority: int = 10,
 ) -> tuple[UUID, UUID]:
     async with session_factory() as session, session.begin():
@@ -157,7 +157,7 @@ def _real_worker(
 @pytest.mark.parametrize(
     "steps",
     [
-        pytest.param(["500", "500", "success"], id="500-500-200"),
+        pytest.param(["500", "500", "500", "success"], id="500-500-500-200"),
         pytest.param(["503", "success"], id="503-200"),
         pytest.param(["invalid-output", "success"], id="invalid-output-valid-output"),
     ],

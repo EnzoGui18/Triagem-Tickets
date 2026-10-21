@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from triagem.core.config import get_settings
 from triagem.models import JobType, ProcessingJob, Ticket
 from triagem.scheduling import classification_queue_priority
 from triagem.schemas import TicketPayload
@@ -96,6 +97,7 @@ async def ingest_ticket(session: AsyncSession, payload: TicketPayload) -> Ingest
             ticket_id=ticket.id,
             job_type=JobType.CLASSIFICATION,
             queue_priority=queue_priority,
+            max_attempts=get_settings().classification_max_attempts,
         )
         session.add(job)
         await session.flush()

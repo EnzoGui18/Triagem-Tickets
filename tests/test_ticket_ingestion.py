@@ -77,6 +77,18 @@ async def test_valid_ticket_is_accepted_and_enqueued(
     assert "recebido_em" in response.json()
     assert await _record_counts(migrated_database_url, external_id) == (1, 1, 0)
 
+    test_engine = create_async_engine(migrated_database_url)
+    try:
+        async with AsyncSession(test_engine) as session:
+            max_attempts = await session.scalar(
+                select(ProcessingJob.max_attempts)
+                .join(Ticket, ProcessingJob.ticket_id == Ticket.id)
+                .where(Ticket.external_id == external_id)
+            )
+    finally:
+        await test_engine.dispose()
+    assert max_attempts == 8
+
 
 async def test_common_ticket_gets_default_queue_priority(
     api_client: AsyncClient,

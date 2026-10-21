@@ -214,6 +214,7 @@ async def test_urgent_classification_creates_alert_and_job_in_same_completion(
     assert alert_job is not None
     assert alert_job.status == JobStatus.PENDING
     assert alert_job.classification_id == classification.id
+    assert alert_job.max_attempts == 8
     assert delivery is not None
     assert delivery.status == AlertDeliveryStatus.PENDING
     assert delivery.attempt_number == 1

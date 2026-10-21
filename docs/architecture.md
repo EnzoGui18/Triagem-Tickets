@@ -90,6 +90,16 @@ tentativas, eles retornam a `retry_scheduled`; se o limite tiver sido atingido, 
 e `attempt_count`, usado como fencing token monotônico. Assim, um worker antigo não conclui um
 job cujo lease já foi assumido por outro processo.
 
+Novos jobs de classificação recebem `max_attempts` de `CLASSIFICATION_MAX_ATTEMPTS`; jobs de
+alerta recebem `ALERT_MAX_ATTEMPTS`. O padrão de ambos é oito. A configuração é materializada em
+cada job na criação, portanto mudanças de ambiente não reescrevem budgets históricos.
+
+O utilitário `triagem.tools.requeue_failed` recupera classificações terminalmente falhas criando
+um novo job, sob lock do ticket e do job mais recente. Essa escolha preserva o job falho e todas as
+suas `classification_attempts`, evita colisões na numeração das tentativas e concede um novo budget
+operacional explícito. O ticket volta a `received`; jobs mais recentes concluídos ou processáveis
+impedem uma reabertura acidental.
+
 ## Modelo de dados inicial
 
 O PostgreSQL contém seis entidades principais:
