@@ -227,6 +227,10 @@ de segurança, urgência explícita ou emergência. Os demais recebem `0`. Essa 
 somente a ordem da fila: categoria, prioridade final, sentimento e alertas continuam dependendo
 exclusivamente do resultado validado do LLM.
 
+A heurística de urgência não é uma classificação alternativa. Ela é usada exclusivamente para
+scheduling da fila e busca reduzir o tempo até análise pelo LLM dos tickets com maior risco
+aparente.
+
 ```mermaid
 stateDiagram-v2
     [*] --> pending
@@ -321,6 +325,11 @@ Classificações são append-only; reprocessar nunca sobrescreve resultados hist
 reclassificação apenas cria um job durável e retorna HTTP 202: a versão usada será a versão atual
 carregada pelo worker. Se já existir um job de classificação em estado processável, a API retorna
 HTTP 409 para evitar reclassificações concorrentes acidentais.
+
+`GET /tickets/{external_id}/classifications` retorna todas as classificações em ordem
+determinística. `GET /tickets/{external_id}` preserva os campos anteriores e inclui `usage` e custo
+na classificação atual. Dessa forma, alterar `CLASSIFIER_PROMPT_VERSION`, reclassificar e comparar
+as versões não exige sobrescrever o resultado anterior.
 
 ## 14. Custos
 
@@ -445,7 +454,9 @@ O serviço `migrate` também é uma dependência de inicialização da API e dos
 
 ### 17.4 Smoke test
 
-No PowerShell, substitua `curl` por `curl.exe` nos exemplos abaixo.
+No PowerShell, use `curl.exe` para os GETs. Para o POST com JSON e caracteres Unicode, use o
+exemplo nativo logo após o bloco Bash; isso evita diferenças de parsing de argumentos entre
+versões do PowerShell e do `curl.exe`.
 
 ```bash
 curl --fail http://localhost:8000/health/live
@@ -456,6 +467,29 @@ curl --fail-with-body \
   -H "Content-Type: application/json" \
   -d '{"external_id":"ENTREGA-SMOKE-001","cliente":{"id":"CLI-SMOKE-001","nome":"Cliente Smoke","email":"smoke@example.com"},"assunto":"Pedido atrasado","mensagem":"Meu pedido ainda não chegou e o prazo já terminou.","canal":"email","criado_em":"2026-10-20T12:00:00Z"}' \
   http://localhost:8000/tickets
+```
+
+Equivalente no PowerShell:
+
+```powershell
+$body = @{
+  external_id = "ENTREGA-SMOKE-001"
+  cliente = @{
+    id = "CLI-SMOKE-001"
+    nome = "Cliente Smoke"
+    email = "smoke@example.com"
+  }
+  assunto = "Pedido atrasado"
+  mensagem = "Meu pedido ainda não chegou e o prazo já terminou."
+  canal = "email"
+  criado_em = "2026-10-20T12:00:00Z"
+} | ConvertTo-Json -Depth 3 -Compress
+
+$bytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+Invoke-RestMethod -Method Post `
+  -Uri http://localhost:8000/tickets `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $bytes
 ```
 
 O POST deve retornar HTTP 202. Repetir exatamente o mesmo payload deve retornar o mesmo UUID.
@@ -474,9 +508,9 @@ De volta ao projeto:
 ```bash
 curl --fail http://localhost:8000/tickets/ENTREGA-SMOKE-001
 curl --fail http://localhost:8000/tickets/ENTREGA-SMOKE-001/timeline
-curl --fail http://localhost:8000/tickets/ATD-001/classifications
+curl --fail http://localhost:8000/tickets/ATD-2026001/classifications
 curl --fail -X POST \
-  http://localhost:8000/tickets/ATD-001/reclassify
+  http://localhost:8000/tickets/ATD-2026001/reclassify
 curl --fail "http://localhost:8000/tickets?page=1&page_size=20"
 curl --fail "http://localhost:8000/tickets?categoria=entrega&prioridade=alta&page=1&page_size=20"
 curl --fail http://localhost:8082/alertas
@@ -595,67 +629,83 @@ Confirme a recuperação por `/health/ready`, `GET /tickets/{external_id}` e
 
 ## 20. Resultados reais
 
-Os simuladores introduzem latência, erros e outputs inválidos aleatoriamente. Os números abaixo
-são resultados observados, não estimativas de produção.
+Os simuladores introduzem latência, erros e outputs inválidos aleatoriamente. Os números desta
+seção foram medidos na regressão final, em 21 de outubro de 2026, com banco limpo, dataset e kit
+oficiais sem alteração e a configuração apresentada neste repositório. Não são estimativas de
+produção.
 
-### 20.1 Revisão de entrega 
+### 20.1 Regressão e carga finais
 
-Esta medição antecede a Fase Final 1; os cinco HTTP 422 abaixo refletem o antigo limite de
-mensagem e são preservados apenas como resultado histórico, não como comportamento atual.
+`ruff check .`, `mypy src`, build Docker, migrations em banco limpo e `alembic check` passaram. A
+suíte integrada em Python 3.12, PostgreSQL e Redis reais terminou com 140 testes aprovados e um
+warning de depreciação Starlette/httpx. O CI do commit validado concluiu com sucesso os cinco jobs:
+lint, types, tests, migrations e Docker build.
 
-Em clone limpo, com banco e volumes novos:
+| Métrica | Resultado |
+|---|---:|
+| Dataset oficial | 500 linhas; 485 `external_id` únicos |
+| Respostas HTTP 202 | 496 |
+| Payloads inválidos rejeitados | 4 linhas / 3 IDs, todos HTTP 422 |
+| Tickets válidos rejeitados | 0 |
+| Tickets únicos aceitos e persistidos | 482 |
+| Classificações concluídas | 482 |
+| Jobs terminais falhos | 0 |
+| Tickets perdidos | 0 |
+| Duplicações físicas | 0 |
+| Tentativas de classificação | 598, sendo 116 adicionais |
+| Respostas LLM 429 | 0 |
+| Duração do envio do lote | 10,0 s |
+| Latência média de ingestão | 163,912 ms |
+| Ingestão p95 / p99 | ambas no bucket `(250, 500] ms` |
 
-| Execução | Aceitos | Rejeitados | Falhas de envio | Retries do cliente |
-|---|---:|---:|---:|---:|
-| 20 entradas oficiais | 20 | 0 | 0 | 0 |
-| 500 entradas oficiais | 495 | 5 com HTTP 422 | 0 | 0 |
+Na carga preliminar de 20 tickets, os 20 foram aceitos, persistidos e classificados, sem rejeição
+ou retry do cliente.
 
-Após a drenagem havia 482 tickets únicos e 482 jobs de classificação, incluindo o ticket de
-smoke: 480 concluídos e 2 falhos após três respostas transitórias do simulador, uma 503 e uma 500.
-Não havia ticket sem job nem ticket com jobs duplicados. Foram entregues 47 alertas.
+O ticket oficial `ATD-2026338`, com 53.960 caracteres, recebeu HTTP 202 na primeira tentativa. A
+mensagem integral permaneceu no PostgreSQL, a classificação terminou com `input_truncated=true` e
+o simulador não registrou `context_length_exceeded`. O limite de 8.000 caracteres existe somente
+na construção do input do LLM; não limita a ingestão nem altera `tickets.message`.
 
-A suíte no clone recém-construído terminou com 112 testes aprovados e um warning de depreciação
-Starlette/httpx. `alembic check` não detectou operações pendentes.
+### 20.2 SLA urgente end-to-end
 
-### 20.2 Performance de ingestão 
+A medição usa `alert_deliveries.delivered_at - tickets.received_at`, incluindo fila, classificação,
+criação do alerta e entrega ao plantão. Não é a latência isolada da requisição HTTP ao plantão.
 
-Medição com 500 entradas, banco vazio e três workers:
+| Métrica | Resultado |
+|---|---:|
+| Alertas urgentes entregues | 49 de 49 |
+| p50 | 69,587 s |
+| p95 | 229,539 s |
+| p99 | 324,213 s |
+| Máximo | 381,593 s |
+| Entregues em até 60 s | 19 |
+| Entregues acima de 60 s | 30 |
+| Percentual em até 60 s | 38,78% |
 
-| Métrica | Baseline, um worker | Configuração final, três workers |
-|---|---:|---:|
-| Aceitas | 495 | 495 |
-| Rejeitadas | 5 | 5 |
-| Duração do lote | 10,681 s | 10,623 s |
-| p50 | 614,548 ms | 691,899 ms |
-| p95 | 1.397,570 ms | 1.808,851 ms |
-| p99 | 2.169,596 ms | 2.942,838 ms |
+No dataset oficial, 19 de 49 alertas urgentes foram entregues em até 60 segundos. O resultado não
+atingiu a meta e não sustenta uma garantia de SLA de um minuto. A heurística de scheduling melhora
+a ordem de análise, mas não elimina a limitação matemática de uma entrada potencial de 50 tickets/s
+contra apenas 5 novas chamadas/s permitidas pelo provedor.
 
-A vazão do lote foi preservada, mas a cauda da ingestão piorou com a concorrência dos workers no
-mesmo host.
+### 20.3 Recuperação e invariantes
 
-Nos primeiros 116 jobs concluídos:
+Os testes finais confirmaram:
 
-| Métrica | Baseline p50/p95/p99 | Final p50/p95/p99 |
-|---|---:|---:|
-| Espera inicial na fila | 119,702 / 225,111 / 230,204 s | 96,812 / 136,936 / 159,268 s |
-| LLM | 1.090 / 4.503 / 6.118 ms | 1.277 / 3.924 / 6.544 ms |
-| Tentativa de classificação | 1,098 / 14,319 / 42,641 s | 1,294 / 15,410 / 39,450 s |
-| Processamento total | 120,459 / 225,108 / 230,202 s | 117,652 / 154,257 / 157,074 s |
+- outage real de 60 segundos do LLM: ingestão HTTP 202, retries persistidos e classificação após a
+  recuperação;
+- Redis indisponível: readiness HTTP 200/degraded, ingestão HTTP 202, job aguardando sem consumir
+  tentativa e conclusão após a volta do Redis;
+- reclassificação: histórico cresceu de uma para duas classificações sem sobrescrita;
+- requeue: o job falho e suas tentativas antigas permaneceram consultáveis, um novo budget foi
+  criado e o worker concluiu a classificação;
+- 485 tickets existentes após todos os cenários estavam classificados e todos os urgentes tinham
+  alert job explicável.
 
-O processamento total p95 caiu 31,5% e o p99 caiu 31,8% nessa amostra. Houve 16 esperas locais no
-rate limiter e zero respostas 429 do provedor.
-
-### 20.3 Chaos/E2E 
-
-Foram exercitados: cargas de 20 e 500, outage de 60 segundos do LLM, workers desligados, restart
-do Redis, duplicata, conflito, payload inválido e reinício da API. Os 495 tickets únicos aceitos
-permaneceram contabilizados como 492 classificados e 3 falhos; nenhum desapareceu.
-
-Resultados completos:
-
-- [carga de ingestão](docs/load-test-results.md);
-- [E2E e chaos](docs/e2e-chaos-results.md);
-- [performance e tuning](docs/performance-tuning-results.md).
+O relatório autoritativo, com método, contagens e limitações, está em
+[`docs/final-validation-results.md`](docs/final-validation-results.md). Relatórios anteriores de
+[carga](docs/load-test-results.md), [chaos](docs/e2e-chaos-results.md) e
+[tuning](docs/performance-tuning-results.md) registram etapas históricas e não substituem a medição
+final.
 
 ## 21. Trade-offs
 
@@ -700,8 +750,10 @@ preservada.
 ## 22. Limitações
 
 - A quota de 5 novas chamadas/s é o principal limite de vazão da classificação.
-- Três falhas transitórias consecutivas podem levar um job ao estado terminal `failed`; o ticket
-  continua durável e auditável, mas não é reprocessado automaticamente sem novo mecanismo.
+- Novos jobs possuem oito tentativas por padrão, mas instabilidade longa ainda pode esgotar o
+  budget e levá-los a `failed`; a recuperação exige a CLI de requeue ou intervenção operacional.
+- A regressão final entregou apenas 19 de 49 alertas urgentes em até 60 segundos. Scheduling por
+  indícios reduz espera relativa, mas não garante esse SLA sob backlog ou carga sustentada.
 - O lease não possui heartbeat. Pausas do processo maiores que o lease podem causar recuperação e
   nova tentativa; fencing impede que o worker antigo grave um segundo resultado.
 - Alertas são at-least-once e podem ser duplicados pelo plantão.
@@ -724,7 +776,6 @@ preservada.
 - migrar para filas ou brokers dedicados quando volume e operação justificarem, preservando
   atomicidade com outbox/inbox;
 - renovar leases com heartbeat para operações longas;
-- adicionar fluxo administrativo de reprocessamento para jobs terminais;
 - agregar métricas dos processos em Prometheus e criar alertas operacionais;
 - aplicar autenticação, autorização, gestão de segredos e políticas de retenção;
 - negociar chave de idempotência com o plantão para reduzir duplicações de alertas;

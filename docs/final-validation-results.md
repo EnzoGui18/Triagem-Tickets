@@ -233,7 +233,6 @@ classificações, zero tickets sem job, zero urgentes sem alert job e zero estad
   `(250, 500] ms` observado para ambos.
 - As dependências não possuem lockfile, portanto builds futuros podem resolver versões
   transitivas diferentes.
-- O README ainda contém duas afirmações antigas: diz que três falhas transitórias podem encerrar
-  um job, embora novos jobs usem oito tentativas, e lista reprocessamento administrativo como
-  evolução futura, embora a CLI de requeue já exista.
+- As inconsistências históricas encontradas no README sobre budget de tentativas e requeue foram
+  corrigidas durante o code freeze, sem alteração do comportamento da aplicação.
 - Métricas continuam process-local e alertas possuem semântica at-least-once.

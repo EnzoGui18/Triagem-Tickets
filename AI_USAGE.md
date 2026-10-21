@@ -34,6 +34,7 @@ execução e não foi usado como ferramenta de desenvolvimento.
 
 O auxílio de IA abrangeu, em graus diferentes:
 
+- análise arquitetural e comparação entre requisitos, documentação, contratos e código existente;
 - bootstrap de FastAPI, configurações, PostgreSQL, Redis, SQLAlchemy assíncrono, Alembic e Docker;
 - modelos, constraints, índices e migrations;
 - ingestão idempotente e testes concorrentes;
@@ -44,8 +45,14 @@ O auxílio de IA abrangeu, em graus diferentes:
 - consultas, paginação e timeline operacional;
 - geração durável e entrega at-least-once de alertas urgentes;
 - logging estruturado, métricas e testes de entradas hostis;
+- ingestão integral de tickets grandes com orçamento e auditoria do input enviado ao LLM;
+- scheduling de tickets com indícios de urgência sem substituir a classificação do LLM;
+- métrica de SLA urgente end-to-end e distinção da latência HTTP do plantão;
+- budgets configuráveis de retry e CLI auditável de requeue;
+- histórico e reclassificação append-only, além da exposição exata de usage e custos;
+- readiness degradado quando somente o Redis está indisponível e pipeline de CI;
 - scripts e procedimentos de carga, E2E, chaos e tuning;
-- documentação de arquitetura, decisões, resultados e execução reproduzível.
+- documentação de arquitetura, decisões, resultados, uso de IA e execução reproduzível.
 
 Isso inclui código de aplicação e de testes. A presença de testes também gerados com auxílio de IA
 não foi tratada como prova suficiente: sempre que possível, os testes foram executados contra
@@ -85,25 +92,29 @@ O código e a documentação foram validados por diferentes níveis de evidênci
 | E2E e chaos | outage, reinício de serviços, duplicatas, conflitos e payloads inválidos |
 | Revisão em ambiente limpo | instruções do README, migrations, smoke test, carga e consultas |
 
-Na revisão final anterior a este documento, a suíte integrada em Python 3.12, PostgreSQL e Redis
-reais executou **112 testes com sucesso**, com um warning de depreciação Starlette/httpx. Ruff,
-MyPy, `docker compose config`, o build da imagem e `git diff --check` também passaram. A execução
-local sem URLs de infraestrutura passou em 52 testes e pulou explicitamente 60 testes que exigem
-PostgreSQL ou Redis.
+Na regressão completa anterior ao code freeze, a suíte integrada em Python 3.12, PostgreSQL e Redis
+reais executou **140 testes com sucesso**, com um warning de depreciação Starlette/httpx. A execução
+local sem URLs de infraestrutura aprovou 65 testes e pulou explicitamente 75 testes que dependem de
+PostgreSQL ou Redis. Ruff, MyPy, `docker compose config`, o build das imagens, migrations em banco
+limpo e `alembic check` também passaram.
 
-Na revisão cruzada desta fase, a primeira execução integrada terminou com 111 testes aprovados e
-uma falha de ordenação no teste de timeline. O mesmo teste passou quando executado isoladamente e a
-repetição da suíte completa terminou com 112 testes aprovados. A ocorrência não foi ocultada nem
-tratada como prova de correção após uma única repetição; permanece como intermitência a acompanhar,
-possivelmente sensível ao relógio do ambiente Docker. Nenhuma alteração de código foi feita sem uma
-causa reproduzível.
+O workflow de CI validou, em Python 3.12, os jobs separados de lint, tipos, testes com PostgreSQL e
+Redis, consistência de migrations e Docker build. O commit da regressão final teve os cinco jobs
+concluídos com sucesso.
+
+O E2E final foi comparado com o kit e o dataset oficiais, ambos usados sem alteração. Ele incluiu
+as cargas de 20 e 500 tickets, o ticket de 53.960 caracteres, estatísticas reais do simulador,
+medição do SLA desde o recebimento, outage do LLM, Redis indisponível, reclassificação e requeue.
+Resultados desfavoráveis — especialmente apenas 19 de 49 alertas urgentes em até 60 segundos —
+foram preservados no relatório, sem conversão de warnings ou falhas de meta em aprovação artificial.
 
 Os resultados de carga, falha e performance não foram inferidos pela IA. Eles foram coletados em
 execuções reais e estão registrados em:
 
 - [`docs/load-test-results.md`](docs/load-test-results.md);
 - [`docs/e2e-chaos-results.md`](docs/e2e-chaos-results.md);
-- [`docs/performance-tuning-results.md`](docs/performance-tuning-results.md).
+- [`docs/performance-tuning-results.md`](docs/performance-tuning-results.md);
+- [`docs/final-validation-results.md`](docs/final-validation-results.md).
 
 ## Decisões humanas e responsabilidade
 
